@@ -24,7 +24,7 @@
 Original project: https://github.com/giltal/ESP32_P4_Launcher (see `LICENSE-original`). Binary patch only: DSI PHY PLL reference clock 6 (PLL_F20M) → 18 (XTAL).
 
 ## כרטיס SD
-התיקייה `SDcard` היא התיקייה המוכנה מהפרויקט של המורה.
+התיקייה `SDcard` כוללת כבר את כל 23 האפליקציות (בתוך `apps`), את קבצי המשחקים החינמיים ואת קושחת שבב ה-Wi-Fi (`update/c6.bin`). אין צורך ב-Store.
 1. מפרמטים את הכרטיס ל-**FAT32**
 2. מעתיקים את **התוכן** של `SDcard` לשורש הכרטיס, כך שבכרטיס יופיעו ישר `apps`, `config`, `roms` וכו'
-3. מכניסים את הכרטיס ללוח ← **Settings → Wi-Fi** ← **Store → Install all**
+3. מכניסים את הכרטיס ללוח ולוחצים RESET. האפליקציות מופיעות במסך הבית.
