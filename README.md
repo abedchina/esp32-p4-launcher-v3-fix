@@ -1,5 +1,19 @@
 # ESP32-P4 Launcher – תיקון ללוח Guition 4.3" עם שבב v3.2
 
+## עדכון: יש גרסה 0.29 שעובדת
+המורה תיקן את הבעיה בגרסה **0.29.0**, והיא נבדקה ועובדת על הלוח (מוצג chip v3).
+
+| קובץ | גרסה | מתי להשתמש |
+|---|---|---|
+| `launcher_guition_p4_43_v3_0.29.0_full.bin` | **0.29** (רשמי של המורה) | **מומלץ** לצריבה |
+| `launcher_guition_p4_43_v3_0.29.0_AbedMihilia_full.bin` | **0.29** + השם שלי | 0.29 עם "Abed Mihilia" במסך הבית |
+| `launcher_guition_p4_43_v3_0.28.1_FIXED_full.bin` | **0.28** (התיקון שלי) | גיבוי בלבד |
+
+מגרסה 0.29 אפשר להשתמש ב-**Settings → Update** בלי חשש (אבל בגרסה עם השם, עדכון ימחק את השם).
+
+`patch_name.py` מחליף את השורה "ESP32-P4  Application Hub" במסך הבית בטקסט אחר ומתקן checksum ו-SHA256:
+`python patch_name.py <in.bin> <out.bin> "Abed Mihilia"`
+
 ## הבעיה
 הקושחה `launcher_guition_p4_43_v3_full.bin` של המורה (גרסאות 0.27.1 ו-0.28.1) קורסת על לוח
 **Guition JC4880P443C_I_W V2.3** עם שבב **ESP32-P4 v3.2**: המסך נשאר שחור והלוח מתחיל מחדש כל 2 שניות.
@@ -15,10 +29,10 @@
 
 ## צריבה
 1. פותחים https://espressif.github.io/esptool-js/ (Chrome או Edge) ולוחצים **Connect**
-2. Flash Address: **0x0**, ובוחרים את הקובץ `launcher_guition_p4_43_v3_0.28.1_FIXED_full.bin`
+2. Flash Address: **0x0**, ובוחרים את הקובץ `launcher_guition_p4_43_v3_0.29.0_full.bin` (או את 0.28 המתוקן)
 3. לוחצים **Program**, ובסוף **RESET**
 
-**לא לעשות Settings → Update** עד שהמורה יתקן את הבעיה אצלו. עדכון יחזיר את הקובץ בלי התיקון.
+בגרסה 0.28 המתוקנת לא לעשות Settings → Update. מגרסה 0.29 זה כבר בטוח.
 
 ---
 Original project: https://github.com/giltal/ESP32_P4_Launcher (see `LICENSE-original`). Binary patch only: DSI PHY PLL reference clock 6 (PLL_F20M) → 18 (XTAL).
