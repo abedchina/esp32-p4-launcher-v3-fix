@@ -302,7 +302,9 @@ int main(int argc, char **argv)
         /* touch: drop food */
         papp_touch_point_t tp[2];
         int n = papp_disp_touch(s, tp, 2);
-        if (n > 0 && tp[0].y < SAND_Y) {
+        bool on_x = n > 0 && tp[0].x > W - 76 && tp[0].y < 76;   /* the X button, top right */
+        if (on_x && !was_down) break;
+        if (n > 0 && !on_x && tp[0].y < SAND_Y) {
             if (!was_down || ++hold % 12 == 0) drop_food(tp[0].x, tp[0].y);
         } else hold = 0;
         was_down = n > 0;
@@ -373,6 +375,15 @@ int main(int argc, char **argv)
             ring(rip[i].x, rip[i].y, rip[i].r, 1.2f, rgb(220, 255, 250), rip[i].life * 20 / 40);
             rip[i].life--;
         }
+
+        /* X button: tap to go back to the launcher */
+        disc(W - 38, 38, 24, rgb(3, 17, 15), 20);
+        ring(W - 38, 38, 24, 1.5f, rgb(45, 224, 194), 30);
+        for (int k = -10; k <= 10; k++)
+            for (int w = -1; w <= 1; w++) {
+                plot(W - 38 + k + w, 38 + k, rgb(255, 255, 255), 32);
+                plot(W - 38 + k + w, 38 - k, rgb(255, 255, 255), 32);
+            }
 
         papp_disp_present(s);
         t += 1.0f / 30;
