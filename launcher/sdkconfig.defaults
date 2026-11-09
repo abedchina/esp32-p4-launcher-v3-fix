@@ -1,0 +1,66 @@
+# ESP32-P4 Launcher — board-independent defaults (board fragment: boards/<id>/sdkconfig.board)
+CONFIG_IDF_TARGET="esp32p4"
+
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_OFFSET=0x8000
+
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# UART0 is the console; USB-Serial-JTAG belongs to DevLink (no plain-text console on it)
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+
+# PSRAM via heap_caps and malloc (large blocks)
+CONFIG_SPIRAM_USE_MALLOC=y
+
+# FATFS long file names
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
+# Wi-Fi through the ESP32-C6 companion (SDIO, slot 1; the SD card is slot 0)
+CONFIG_SLAVE_IDF_TARGET_ESP32C6=y
+CONFIG_ESP_WIFI_REMOTE_LIBRARY_HOSTED=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_CMN=y
+CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE=y
+
+# Self-update: a new launcher that doesn't confirm itself is rolled back
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Crash reports: core dump to flash (ELF) — read back by DevLink CRASH
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# FAST region (ARCHITECTURE §5.3, Spike B / ADR D3): app code tagged PAPP_FAST runs from
+# internal SRAM, which needs heap SRAM to be executable (MALLOC_CAP_EXEC). Costs the
+# PMP split between launcher code and data (no W^X for internal RAM).
+CONFIG_ESP_SYSTEM_PMP_IDRAM_SPLIT=n
+
+# Launcher UI (LVGL 9): system malloc (big blocks go to PSRAM), fonts for the home screen,
+# PNG icons read from the SD card through stdio ("S:/sd/apps/<app>/icon.png")
+CONFIG_LV_USE_CLIB_MALLOC=y
+CONFIG_LV_DEF_REFR_PERIOD=16
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_16=y
+CONFIG_LV_USE_FS_STDIO=y
+CONFIG_LV_FS_STDIO_LETTER=83
+CONFIG_LV_FS_STDIO_PATH=""
+CONFIG_LV_USE_LODEPNG=y
+# Decoded images (app icons) are cached instead of decoded on every redraw
+CONFIG_LV_CACHE_DEF_SIZE=4194304
+CONFIG_LV_IMAGE_HEADER_CACHE_DEF_CNT=64
+
+# Apps' network (NET): up to 8 sockets of their own beside the launcher's (web file manager,
+# updates); TLS buffers (about 20 KB per session) in PSRAM, so internal RAM stays for esp_hosted
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y

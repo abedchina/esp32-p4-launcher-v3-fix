@@ -1,0 +1,5 @@
+dependencies:
+  idf: ">=5.5"
+  # Versions are pinned by each board's package (boards/<id>/board/idf_component.yml):
+  # esp_hosted must match the firmware on that board's ESP32-C6
+  espressif/esp_wifi_remote: "*"
