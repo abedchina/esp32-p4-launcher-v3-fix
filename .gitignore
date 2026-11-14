@@ -10,3 +10,6 @@ __pycache__/
 .vscode/
 launcher/sdkconfig.*
 !launcher/sdkconfig.defaults
+
+# private settings of apps (tokens)
+apps/*/secret.h
