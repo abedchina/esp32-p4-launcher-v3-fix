@@ -56,7 +56,6 @@ static bool starts_ci(const char *s, const char *p)
     return true;
 }
 
-static void upcase(char *s) { for (; *s; s++) if (*s >= 'a' && *s <= 'z') *s -= 32; }
 
 /* ══ pixels + font ════════════════════════════════════════════════════════ */
 static uint16_t *px;
@@ -80,54 +79,118 @@ static void frame_rect(int x, int y, int w, int h, uint16_t c)
     fill(x, y, 1, h, c); fill(x + w - 1, y, 1, h, c);
 }
 
-static const char FONT_CHARS[] = " 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ:-!'.x/*<>%()";
-static const uint8_t FONT[][7] = {
-    {0, 0, 0, 0, 0, 0, 0},
-    {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E},
-    {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E},
-    {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}, {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E},
-    {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}, {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08},
-    {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}, {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C},
-    {0x0E, 0x11, 0x11, 0x11, 0x1F, 0x11, 0x11}, {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E},
-    {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E}, {0x1C, 0x12, 0x11, 0x11, 0x11, 0x12, 0x1C},
-    {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}, {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10},
-    {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F}, {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11},
-    {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}, {0x07, 0x02, 0x02, 0x02, 0x02, 0x12, 0x0C},
-    {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11}, {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F},
-    {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11}, {0x11, 0x11, 0x19, 0x15, 0x13, 0x11, 0x11},
-    {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}, {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10},
-    {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D}, {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11},
-    {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}, {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04},
-    {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E}, {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04},
-    {0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0A}, {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11},
-    {0x11, 0x11, 0x11, 0x0A, 0x04, 0x04, 0x04}, {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F},
-    {0x00, 0x0C, 0x0C, 0x00, 0x0C, 0x0C, 0x00}, {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00},
-    {0x04, 0x04, 0x04, 0x04, 0x04, 0x00, 0x04}, {0x0C, 0x04, 0x08, 0x00, 0x00, 0x00, 0x00},
-    {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C}, {0x00, 0x00, 0x11, 0x0A, 0x04, 0x0A, 0x11},
-    {0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x00}, {0x04, 0x15, 0x0E, 0x1B, 0x0E, 0x15, 0x04},
-    {0x02, 0x04, 0x08, 0x10, 0x08, 0x04, 0x02}, {0x08, 0x04, 0x02, 0x01, 0x02, 0x04, 0x08},
-    {0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03}, {0x02, 0x04, 0x08, 0x08, 0x08, 0x04, 0x02},
-    {0x08, 0x04, 0x02, 0x02, 0x02, 0x04, 0x08},
-};
+/* ══ Hebrew + Latin text (Arial, anti-aliased, right to left) ════════════ */
+#include "font_he.h"
 
-static void draw_char(int x, int y, char ch, uint16_t c, int sc)
+static inline uint16_t blend(uint16_t d, uint16_t s, int a)   /* a = 0..32 */
 {
-    if (ch >= 'a' && ch <= 'z' && ch != 'x') ch -= 32;
-    const char *p = ch ? strchr(FONT_CHARS, ch) : NULL;
-    if (!p) return;
-    const uint8_t *g = FONT[p - FONT_CHARS];
-    for (int r = 0; r < 7; r++)
-        for (int k = 0; k < 5; k++)
-            if (g[r] & (0x10 >> k)) fill(x + k * sc, y + r * sc, sc, sc, c);
+    uint32_t dd = (d | ((uint32_t)d << 16)) & 0x07E0F81F;
+    uint32_t ss = (s | ((uint32_t)s << 16)) & 0x07E0F81F;
+    uint32_t r = ((((ss - dd) * a) >> 5) + dd) & 0x07E0F81F;
+    return (uint16_t)(r | (r >> 16));
 }
 
-static int text_w(const char *s, int sc) { return (int)strlen(s) * 6 * sc - sc; }
-
-static void text(int x, int y, const char *s, uint16_t c, int sc)
+static const glyph_t *glyph(const font_t *f, uint32_t cp)
 {
-    for (int i = 0; s[i]; i++) draw_char(x + i * 6 * sc, y, s[i], c, sc);
+    for (int i = 0; i < f->n; i++) if (f->g[i].cp == cp) return &f->g[i];
+    return NULL;
 }
 
+static uint32_t utf8_next(const char **ps)
+{
+    const uint8_t *s = (const uint8_t *)*ps;
+    uint32_t c = *s++;
+    if (c >= 0xF0)      { c = (c & 7) << 18 | (s[0] & 63) << 12 | (s[1] & 63) << 6 | (s[2] & 63); s += 3; }
+    else if (c >= 0xE0) { c = (c & 15) << 12 | (s[0] & 63) << 6 | (s[1] & 63); s += 2; }
+    else if (c >= 0xC0) { c = (c & 31) << 6 | (s[0] & 63); s += 1; }
+    *ps = (const char *)s;
+    return c;
+}
+
+static void draw_glyph(const font_t *f, const glyph_t *g, int x, int y, uint16_t c)
+{
+    const uint8_t *b = f->bits + g->off;
+    for (int j = 0; j < g->h; j++) {
+        int yy = y + g->y + j;
+        if ((unsigned)yy >= H) continue;
+        for (int i = 0; i < g->w; i++) {
+            int a = b[j * g->w + i];
+            int xx = x + g->x + i;
+            if (!a || (unsigned)xx >= W) continue;
+            uint16_t *p = &px[yy * stride + xx];
+            *p = a >= 250 ? c : blend(*p, c, (a * 33) >> 8);
+        }
+    }
+}
+
+/* 1 = Hebrew (right to left), 2 = Latin letter / digit, 0 = neutral */
+static int cls(uint32_t cp)
+{
+    if ((cp >= 0x5D0 && cp <= 0x5EA) || cp == 0x5F3) return 1;
+    if ((cp >= '0' && cp <= '9') || (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z')) return 2;
+    return 0;
+}
+
+#define MAXCP 96
+
+static int u8decode(const char *s, uint32_t *cp)
+{
+    int n = 0;
+    while (*s && n < MAXCP) cp[n++] = utf8_next(&s);
+    return n;
+}
+
+static int htext_w(const font_t *f, const char *s)
+{
+    uint32_t cp[MAXCP];
+    int n = u8decode(s, cp), w = 0;
+    for (int i = 0; i < n; i++) { const glyph_t *g = glyph(f, cp[i]); if (g) w += g->adv; }
+    return w;
+}
+
+/* draws s with its RIGHT edge at xr (a right-to-left line with simple bidi:
+   runs of Latin/digits keep their order, everything else goes right to left) */
+static void htext(const font_t *f, int xr, int y, const char *s, uint16_t c)
+{
+    uint32_t cp[MAXCP];
+    int k[MAXCP];
+    int n = u8decode(s, cp);
+    for (int i = 0; i < n; i++) k[i] = cls(cp[i]);
+    /* "%", "°", ".", ":" and "-" right after a Latin/digit belong to it */
+    for (int i = 1; i < n; i++)
+        if (!k[i] && k[i - 1] == 2 && (cp[i] == '%' || cp[i] == 0xB0 || cp[i] == '.'))
+            k[i] = 2;
+    /* other neutrals: Latin only between Latin, else Hebrew direction */
+    for (int i = 0; i < n; i++) {
+        if (k[i]) continue;
+        int a = 0, b = 0;
+        for (int j = i - 1; j >= 0; j--) if (k[j]) { a = k[j]; break; }
+        for (int j = i + 1; j < n; j++) if (cls(cp[j])) { b = cls(cp[j]); break; }
+        k[i] = (a == 2 && b == 2) ? 2 : 1;
+    }
+    int x = xr;
+    for (int i = 0; i < n;) {
+        if (k[i] == 1) {
+            uint32_t ch = cp[i] == '(' ? ')' : cp[i] == ')' ? '(' : cp[i];   /* mirrored in RTL */
+            const glyph_t *g = glyph(f, ch);
+            if (g) { x -= g->adv; draw_glyph(f, g, x, y, c); }
+            i++;
+        } else {
+            int j = i, w = 0;
+            while (j < n && k[j] == 2) { const glyph_t *g = glyph(f, cp[j]); if (g) w += g->adv; j++; }
+            int lx = x - w;
+            for (int m = i; m < j; m++) {
+                const glyph_t *g = glyph(f, cp[m]);
+                if (g) { draw_glyph(f, g, lx, y, c); lx += g->adv; }
+            }
+            x -= w;
+            i = j;
+        }
+    }
+}
+
+static void htext_left(const font_t *f, int x, int y, const char *s, uint16_t c) { htext(f, x + htext_w(f, s), y, s, c); }
+static void htext_center(const font_t *f, int cx, int y, const char *s, uint16_t c) { htext(f, cx + htext_w(f, s) / 2, y, s, c); }
 /* ══ colours ══════════════════════════════════════════════════════════════ */
 #define C_BG     rgb(11, 18, 32)
 #define C_CARD   rgb(22, 32, 52)
@@ -562,7 +625,10 @@ static int jout(JDEC *jd, void *bmp, JRECT *r)
     const uint16_t *s = (const uint16_t *)bmp;
     for (int y = r->top; y <= r->bottom; y++)
         for (int x = r->left; x <= r->right; x++, s++)
-            if (x < d->dw && y < d->dh) d->dst[y * d->dw + x] = *s;
+            if (x < d->dw && y < d->dh) {
+                uint16_t v = *s;   /* this TJpgDec (LVGL copy) gives B and R swapped */
+                d->dst[y * d->dw + x] = (uint16_t)((v & 0x1F) << 11 | (v & 0x7E0) | (v >> 11));
+            }
     return 1;
 }
 
@@ -693,10 +759,23 @@ static void draw_x_button(void)
     }
 }
 
-static void label_value(int x, int y, const char *label, const char *value, uint16_t c, int sc)
+static const char *he_cmd(const char *c)
 {
-    text(x, y, label, C_MUTED, 1);
-    text(x, y + 10, value, c, sc);
+    if (!strcmp(c, "forward"))  return "קדימה";
+    if (!strcmp(c, "backward")) return "אחורה";
+    if (!strcmp(c, "left"))     return "שמאלה";
+    if (!strcmp(c, "right"))    return "ימינה";
+    if (!strcmp(c, "stop"))     return "עצור";
+    return c[0] ? c : "-";
+}
+
+#define PANEL_R 394          /* right edge of the info panel */
+
+/* "label: value" on one line, right aligned, two colours */
+static void inline_lv(int y, const char *label, const char *value, uint16_t vc)
+{
+    htext(&font_small, PANEL_R, y, label, C_MUTED);
+    htext(&font_small, PANEL_R - htext_w(&font_small, label) - 5, y, value, vc);
 }
 
 static void render(void)
@@ -719,79 +798,82 @@ static void render(void)
     }
     papp_mutex_unlock(mtx);
 
-    text(8, 8, "HAND ROBOT AI", C_TEAL, 1);
-    {
-        const char *ns = st.net == NS_ONLINE ? "ONLINE" : st.net == NS_WAKING ? "SERVER WAKING UP..." :
-                         st.net == NS_TOKEN ? "WRONG TOKEN" : st.net == NS_ERROR ? "NO CONNECTION" : "CONNECTING...";
-        uint16_t nc = st.net == NS_ONLINE ? C_GOOD : st.net == NS_CONNECTING || st.net == NS_START ? C_WARN : C_BAD;
-        fill(98, 9, 6, 6, nc);
-        text(108, 8, ns, nc, 1);
-    }
+    /* top bar: title (right, beside the X), connection (left) */
     draw_x_button();
+    htext(&font_small, W - 36, 5, "רובוט תנועות ידיים", C_TEAL);
+    {
+        const char *ns = st.net == NS_ONLINE ? "מחובר לשרת" : st.net == NS_WAKING ? "השרת מתעורר..." :
+                         st.net == NS_TOKEN ? "סיסמה שגויה" : st.net == NS_ERROR ? "אין חיבור" : "מתחבר...";
+        uint16_t nc = st.net == NS_ONLINE ? C_GOOD : st.net == NS_CONNECTING || st.net == NS_START ? C_WARN : C_BAD;
+        fill(8, 9, 7, 7, nc);
+        htext_left(&font_small, 19, 5, ns, nc);
+    }
 
     /* video box */
     if (!fresh) {
-        const char *m1 = none ? "NO VIDEO" : "WAITING FOR VIDEO...";
-        const char *m2 = none ? "OPEN THE CAMERA PAGE" : "";
-        text(VID_X + (VID_W - text_w(m1, 1)) / 2, VID_Y + 80, m1, C_MUTED, 1);
-        if (*m2) text(VID_X + (VID_W - text_w(m2, 1)) / 2, VID_Y + 94, m2, C_MUTED, 1);
+        int cx = VID_X + VID_W / 2;
+        htext_center(&font_small, cx, VID_Y + 74, none ? "אין וידאו" : "ממתין לווידאו...", C_MUTED);
+        if (none) htext_center(&font_small, cx, VID_Y + 94, "פתחו את דף המצלמה במחשב", C_MUTED);
     }
     frame_rect(VID_X - 1, VID_Y - 1, VID_W + 2, VID_H + 2, C_LINE);
     {
         char fps[16];
         char *p = s_add(fps, "FPS ");
         p = s_int(p, vfps10 / 10); p = s_add(p, "."); s_int(p, vfps10 % 10);
-        text(VID_X + 2, VID_Y + VID_H + 6, fps, C_MUTED, 1);
+        htext_left(&font_small, VID_X, VID_Y + VID_H + 3, fps, C_MUTED);
     }
 
     /* right panel */
-    int x = 256;
-    char tmp[32];
+    htext(&font_small, PANEL_R, 28, "ה-AI רואה", C_MUTED);
     if (st.gesture[0]) {
-        strcpy(tmp, st.gesture); upcase(tmp);
-        label_value(x, 30, "AI SEES", tmp, cmd_color(st.gesture), 2);
-        char cf[16]; char *p = s_add(cf, "CONFIDENCE "); p = s_int(p, st.conf); s_add(p, "%");
-        text(x, 56, cf, C_MUTED, 1);
+        htext(&font_big, PANEL_R, 42, he_cmd(st.gesture), cmd_color(st.gesture));
+        char cf[32]; char *p = s_add(cf, "ביטחון "); p = s_int(p, st.conf); s_add(p, "%");
+        htext(&font_small, PANEL_R, 68, cf, C_MUTED);
     } else {
-        label_value(x, 30, "AI SEES", st.cam_live ? "NO HAND" : "CAMERA OFF", C_MUTED, 2);
+        htext(&font_big, PANEL_R, 42, st.cam_live ? "אין יד" : "מצלמה כבויה", C_MUTED);
     }
 
-    strcpy(tmp, st.robot[0] ? st.robot : "-"); upcase(tmp);
-    label_value(x, 74, "ROBOT DOES", tmp, cmd_color(st.robot), 2);
+    htext(&font_small, PANEL_R, 88, "הרובוט עושה", C_MUTED);
+    htext(&font_big, PANEL_R, 102, he_cmd(st.robot), cmd_color(st.robot));
 
     {
         bool manual = !strcmp(st.mode, "manual");
-        label_value(x, 104, "MODE", manual ? "JOYSTICK / MANUAL" : "AI HAND GESTURES",
-                    manual ? C_WARN : C_TEAL, 1);
+        inline_lv(132, "מצב:", manual ? "ג'ויסטיק (ידני)" : "AI תנועות יד", manual ? C_WARN : C_TEAL);
     }
-    label_value(x, 128, "ESP32 ROBOT", st.esp_online ? "ONLINE" : "OFFLINE", st.esp_online ? C_GOOD : C_BAD, 1);
+    inline_lv(150, "הרובוט:", st.esp_online ? "מחובר" : "מנותק", st.esp_online ? C_GOOD : C_BAD);
     {
-        char th[32]; char *p = th;
-        p = s_add(p, "T:");
-        if (st.has_temp) { p = s_int(p, st.temp); p = s_add(p, "C"); } else p = s_add(p, "--");
-        p = s_add(p, "  H:");
+        char th[48]; char *p = th;
+        p = s_add(p, "טמפ' ");
+        if (st.has_temp) { p = s_int(p, st.temp); p = s_add(p, "°"); } else p = s_add(p, "--");
+        p = s_add(p, "   לחות ");
         if (st.has_hum) { p = s_int(p, st.hum); p = s_add(p, "%"); } else p = s_add(p, "--");
-        label_value(x, 152, "CLIMATE", th, C_INK, 1);
+        htext(&font_small, PANEL_R, 168, th, C_INK);
     }
     {
-        const char *pn = pad_connected ? pad_name : "NO JOYSTICK";
-        strncpy(tmp, pn, 23); tmp[23] = 0; upcase(tmp);
-        label_value(x, 176, "JOYSTICK", tmp, pad_connected ? C_GOOD : C_MUTED, 1);
+        char nm[24];
+        strncpy(nm, pad_connected ? pad_name : "", 23); nm[23] = 0;
+        inline_lv(186, "ג'ויסטיק:", pad_connected ? nm : "לא מחובר", pad_connected ? C_GOOD : C_MUTED);
     }
 
     /* bottom: hint + AI button */
-    text(8, 226, "STICK: DRIVE  A/B: STOP  START: AI", C_MUTED, 1);
+    {   /* each piece drawn alone: no mixed-direction surprises */
+        int x = VID_X + VID_W;
+        htext(&font_small, x, 224, "עצירה", C_MUTED);      x -= htext_w(&font_small, "עצירה") + 4;
+        htext(&font_small, x, 224, "A/B", C_INK);          x -= htext_w(&font_small, "A/B") + 18;
+        htext(&font_small, x, 224, "חזרה ל-AI", C_MUTED);  x -= htext_w(&font_small, "חזרה ל-AI") + 4;
+        htext(&font_small, x, 224, "START", C_INK);
+    }
     fill(AI_BTN_X, AI_BTN_Y, AI_BTN_W, AI_BTN_H, C_TEAL);
-    text(AI_BTN_X + (AI_BTN_W - text_w("AI MODE", 1)) / 2, AI_BTN_Y + 8, "AI MODE", C_BG, 1);
+    htext_center(&font_small, AI_BTN_X + AI_BTN_W / 2, AI_BTN_Y + 4, "חזרה למצב AI", C_BG);
 }
 
 static void message_screen(papp_surface_t *s, const char *l1, const char *l2)
 {
     px = papp_disp_lock(s, &stride);
     fill(0, 0, W, H, C_BG);
-    text((W - text_w("HAND ROBOT AI", 2)) / 2, 70, "HAND ROBOT AI", C_TEAL, 2);
-    text((W - text_w(l1, 1)) / 2, 120, l1, C_INK, 1);
-    if (l2) text((W - text_w(l2, 1)) / 2, 136, l2, C_MUTED, 1);
+    htext_center(&font_big, W / 2, 66, "רובוט תנועות ידיים", C_TEAL);
+    htext_center(&font_small, W / 2, 112, l1, C_INK);
+    if (l2) htext_center(&font_small, W / 2, 132, l2, C_MUTED);
     draw_x_button();
     papp_disp_present(s);
 }
@@ -813,22 +895,22 @@ int main(int argc, char **argv)
     /* Wi-Fi */
     net = papp_net();
     if (!net) {
-        message_screen(s, "THIS LAUNCHER HAS NO NETWORK", "UPDATE THE LAUNCHER (0.29+)");
-        while (!papp_exit_requested() && !read_touch(s)) { papp_delay_ms(30); message_screen(s, "THIS LAUNCHER HAS NO NETWORK", "UPDATE THE LAUNCHER (0.29+)"); }
+        message_screen(s, "ללאנצ'ר אין רשת", "עדכנו לגרסה 0.29 ומעלה");
+        while (!papp_exit_requested() && !read_touch(s)) { papp_delay_ms(30); message_screen(s, "ללאנצ'ר אין רשת", "עדכנו לגרסה 0.29 ומעלה"); }
         return 0;
     }
-    message_screen(s, "CONNECTING TO WI-FI...", NULL);
+    message_screen(s, "מתחבר ל-Wi-Fi...", NULL);
     if (net->up(15000) != PAPP_E_OK) {
         int r = papp_ui_wifi();
         if (r != 1) {
             for (;;) {
-                message_screen(s, "NO WI-FI", "TAP X TO EXIT");
+                message_screen(s, "אין Wi-Fi", "לחצו X ליציאה");
                 if (papp_exit_requested() || read_touch(s)) return 0;
                 papp_delay_ms(30);
             }
         }
     }
-    message_screen(s, "CONNECTING TO THE SERVER...", ROBOT_HOST);
+    message_screen(s, "מתחבר לשרת...", ROBOT_HOST);
 
     papp_thread_cfg_t tc = { .name = "hr_ctl", .stack_size = 16384, .prio = PAPP_PRIO_NORMAL, .core = -1 };
     papp_thread_t *t_ctl = papp_thread_create(control_thread, NULL, &tc);
