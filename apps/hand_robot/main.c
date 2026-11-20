@@ -7,7 +7,10 @@
  *    ESP32 online, temperature and humidity
  *  - the joystick drives the robot: moving it switches the server to manual
  *    mode, letting go stops the robot, A/B = stop, START = back to AI mode
- *  - touch: X (top right) exits, AI button returns to AI mode
+ *  - touch: X (top right) exits, AI button returns to AI mode,
+ *    tap on the video = full screen video, tap again = back
+ *  - the layout is drawn at 400 x 240 and doubled; the video is drawn at the
+ *    full 800 x 480 surface resolution (1.1.0: was decoded to 240 x 180)
  *
  * Two worker threads, each with its own kept-open HTTPS connection:
  *   control: /api/state (5x per second) and /api/control (joystick)
@@ -26,13 +29,21 @@
 
 PAPP_MANIFEST(.id = "abed.handrobot", .name = "Hand Robot", .version = PAPP_APP_VERSION, .main_stack = 32768);
 
+/* The screen layout is drawn at 400 x 240 (W x H) into ui[] and shown 2x on
+   the 800 x 480 surface (SW x SH). The video is drawn straight at the
+   surface resolution - twice as sharp as the layout - and can go full screen. */
 #define W 400
 #define H 240
+#define SW (W * 2)
+#define SH (H * 2)
 
 #define VID_X 6
 #define VID_Y 28
 #define VID_W 240
 #define VID_H 180
+
+#define VMAX_W 800            /* largest decoded video frame */
+#define VMAX_H 480
 
 /* ══ small string helpers (no stdio) ══════════════════════════════════════ */
 static char *s_add(char *d, const char *s) { while (*s) *d++ = *s++; *d = 0; return d; }
@@ -58,8 +69,9 @@ static bool starts_ci(const char *s, const char *p)
 
 
 /* ══ pixels + font ════════════════════════════════════════════════════════ */
-static uint16_t *px;
-static int stride;
+static uint16_t ui[W * H];          /* the layout, drawn at 400 x 240 */
+static uint16_t *px = ui;
+static int stride = W;
 
 static inline uint16_t rgb(int r, int g, int b) { return PAPP_RGB565(r, g, b); }
 
@@ -234,9 +246,10 @@ static papp_mutex_t *mtx;
 static volatile bool run = true;
 static const papp_if_net_t *net;
 
-/* video: the decoder fills vback, then it is swapped into vfront */
-static uint16_t vbuf[2][VID_W * VID_H];
-static uint16_t *vfront = vbuf[0], *vback = vbuf[1];
+/* video: the decoder fills vback, then it is swapped into vfront
+   (full size frames, up to VMAX_W x VMAX_H, in PSRAM - allocated in main) */
+static uint16_t *vfront, *vback;
+static volatile bool fullscreen;    /* video on the whole screen */
 static int vw, vh;            /* size of vfront */
 static int64_t vtime;         /* last good frame */
 static bool v_none;           /* server has no video (camera page not sharing) */
@@ -599,8 +612,8 @@ static int control_thread(void *arg)
 
 /* ══ video thread: /frame -> JPEG decode ══════════════════════════════════ */
 static conn_t vconn;
-static uint8_t jpg[160 * 1024];
-static uint8_t jwork[16 * 1024];
+static uint8_t jpg[256 * 1024];
+static uint8_t jwork[48 * 1024];      /* JD_FASTDECODE 2 needs the Huffman tables too */
 
 typedef struct {
     const uint8_t *p;
@@ -637,11 +650,12 @@ static bool decode(const uint8_t *data, int len)
     JDEC jd;
     jsrc_t src = { data, (size_t)len, 0, vback, 0, 0 };
     if (jd_prepare(&jd, jin, jwork, sizeof(jwork), &src) != JDR_OK) return false;
+    /* full size (a 640 x 480 frame stays 640 x 480); only bigger frames are scaled down */
     int sc = 0;
-    while (sc < 3 && ((jd.width >> sc) > VID_W || (jd.height >> sc) > VID_H)) sc++;
+    while (sc < 3 && ((jd.width >> sc) > VMAX_W || (jd.height >> sc) > VMAX_H)) sc++;
     int dw = (jd.width + (1 << sc) - 1) >> sc, dh = (jd.height + (1 << sc) - 1) >> sc;
-    src.dw = dw > VID_W ? VID_W : dw;
-    src.dh = dh > VID_H ? VID_H : dh;
+    src.dw = dw > VMAX_W ? VMAX_W : dw;
+    src.dh = dh > VMAX_H ? VMAX_H : dh;
     if (jd_decomp(&jd, jout, (uint8_t)sc) != JDR_OK) return false;
 
     papp_mutex_lock(mtx);
@@ -731,21 +745,26 @@ static void read_pad(void)
 #define AI_BTN_W 94
 #define AI_BTN_H 22
 
+static bool video_fresh(void);
+
 static bool read_touch(papp_surface_t *s)
 {
-    static bool was_x, was_ai;
+    static bool was_down;
     papp_touch_point_t tp[3];
     int n = papp_disp_touch(s, tp, 3);
-    bool on_x = false, on_ai = false;
-    for (int i = 0; i < n; i++) {
-        int x = tp[i].x, y = tp[i].y;
-        if (x > W - 44 && y < 40) on_x = true;
-        if (x >= AI_BTN_X - 4 && x < AI_BTN_X + AI_BTN_W + 4 && y >= AI_BTN_Y - 6) on_ai = true;
+    bool down = n > 0, tap = down && !was_down;
+    was_down = down;
+    if (!tap) return false;
+
+    int x = tp[0].x / 2, y = tp[0].y / 2;           /* surface (800 x 480) -> layout (400 x 240) */
+    if (x > W - 44 && y < 40) return true;           /* X: exit (also in full screen) */
+    if (fullscreen) { fullscreen = false; return false; }   /* any other tap: back */
+    if (x >= AI_BTN_X - 4 && x < AI_BTN_X + AI_BTN_W + 4 && y >= AI_BTN_Y - 6) {
+        pad_active = false; pad_cmd = "stop"; ai_seq++;
+    } else if (x >= VID_X && x < VID_X + VID_W && y >= VID_Y && y < VID_Y + VID_H && video_fresh()) {
+        fullscreen = true;
     }
-    if (on_ai && !was_ai) { pad_active = false; pad_cmd = "stop"; ai_seq++; }
-    bool exit_tap = on_x && !was_x;
-    was_x = on_x; was_ai = on_ai;
-    return exit_tap;
+    return false;
 }
 
 /* ══ drawing ══════════════════════════════════════════════════════════════ */
@@ -789,13 +808,8 @@ static void render(void)
     papp_mutex_lock(mtx);
     st = sh;
     int64_t now = papp_time_us();
-    bool fresh = vw > 0 && now - vtime < 3000000;
+    bool fresh = vw > 0 && now - vtime < 3000000;   /* the picture itself: blit_video() */
     bool none = v_none;
-    if (fresh) {
-        int ox = VID_X + (VID_W - vw) / 2, oy = VID_Y + (VID_H - vh) / 2;
-        for (int y = 0; y < vh; y++)
-            memcpy(&px[(oy + y) * stride + ox], &vfront[y * vw], (size_t)vw * 2);
-    }
     papp_mutex_unlock(mtx);
 
     /* top bar: title (right, beside the X), connection (left) */
@@ -817,10 +831,12 @@ static void render(void)
     }
     frame_rect(VID_X - 1, VID_Y - 1, VID_W + 2, VID_H + 2, C_LINE);
     {
-        char fps[16];
+        char fps[40];
         char *p = s_add(fps, "FPS ");
-        p = s_int(p, vfps10 / 10); p = s_add(p, "."); s_int(p, vfps10 % 10);
+        p = s_int(p, vfps10 / 10); p = s_add(p, "."); p = s_int(p, vfps10 % 10);
+        if (fresh) { p = s_add(p, "  "); p = s_int(p, vw); p = s_add(p, "x"); s_int(p, vh); }
         htext_left(&font_small, VID_X, VID_Y + VID_H + 3, fps, C_MUTED);
+        if (fresh) htext(&font_small, VID_X + VID_W, VID_Y + VID_H + 3, "לחצו למסך מלא", C_MUTED);
     }
 
     /* right panel */
@@ -867,14 +883,97 @@ static void render(void)
     htext_center(&font_small, AI_BTN_X + AI_BTN_W / 2, AI_BTN_Y + 4, "חזרה למצב AI", C_BG);
 }
 
+/* ══ to the 800 x 480 surface ═════════════════════════════════════════════ */
+/* ui[] doubled: each pixel 2 x 2 (the odd rows are copies of the even rows) */
+static void blit_ui(uint16_t *dst, int ds)
+{
+    for (int y = 0; y < H; y++) {
+        const uint16_t *s = &ui[y * W];
+        uint16_t *d = &dst[(2 * y) * ds];
+        for (int x = 0; x < W; x++) { uint16_t p = s[x]; d[2 * x] = p; d[2 * x + 1] = p; }
+        memcpy(d + ds, d, SW * 2);
+    }
+}
+
+static void sfill(uint16_t *dst, int ds, int x, int y, int w, int h, uint16_t c)
+{
+    int x0 = x < 0 ? 0 : x, y0 = y < 0 ? 0 : y;
+    int x1 = x + w > SW ? SW : x + w, y1 = y + h > SH ? SH : y + h;
+    for (int j = y0; j < y1; j++) {
+        uint16_t *row = &dst[j * ds];
+        for (int i = x0; i < x1; i++) row[i] = c;
+    }
+}
+
+/* the newest video frame, as big as fits into the box (keeps its shape).
+   Same size = straight copy (sharpest); otherwise nearest-pixel scaling. */
+static void blit_video(uint16_t *dst, int ds, int bx, int by, int bw, int bh)
+{
+    static int xmap[SW];
+    papp_mutex_lock(mtx);
+    int w = vw, h = vh;
+    if (w > 0 && h > 0) {
+        int ow = bw, oh = h * bw / w;
+        if (oh > bh) { oh = bh; ow = w * bh / h; }
+        int ox = bx + (bw - ow) / 2, oy = by + (bh - oh) / 2;
+        if (ow == w && oh == h) {
+            for (int y = 0; y < h; y++)
+                memcpy(&dst[(oy + y) * ds + ox], &vfront[y * w], (size_t)w * 2);
+        } else {
+            for (int x = 0; x < ow; x++) xmap[x] = x * w / ow;
+            for (int y = 0; y < oh; y++) {
+                const uint16_t *s = &vfront[(y * h / oh) * w];
+                uint16_t *d = &dst[(oy + y) * ds + ox];
+                for (int x = 0; x < ow; x++) d[x] = s[xmap[x]];
+            }
+        }
+    }
+    papp_mutex_unlock(mtx);
+}
+
+static bool video_fresh(void)
+{
+    papp_mutex_lock(mtx);
+    bool f = vw > 0 && papp_time_us() - vtime < 3000000;
+    papp_mutex_unlock(mtx);
+    return f;
+}
+
+/* one whole frame on the surface: the layout (2x) + sharp video, or full screen video */
+static void present_frame(papp_surface_t *s)
+{
+    int ds;
+    uint16_t *dst = papp_disp_lock(s, &ds);
+    bool fresh = video_fresh();
+    if (fullscreen && !fresh) fullscreen = false;   /* video lost: back to the layout */
+
+    if (fullscreen) {
+        sfill(dst, ds, 0, 0, SW, SH, rgb(0, 0, 0));
+        blit_video(dst, ds, 0, 0, SW, SH);
+        /* X (exit) top right, like on the layout, at the surface size */
+        int x = SW - 56, y = 6;
+        sfill(dst, ds, x, y, 48, 36, C_BAD);
+        for (int i = 0; i < 20; i++) {
+            sfill(dst, ds, x + 14 + i, y + 8 + i, 4, 2, C_INK);
+            sfill(dst, ds, x + 32 - i, y + 8 + i, 4, 2, C_INK);
+        }
+    } else {
+        blit_ui(dst, ds);
+        if (fresh) blit_video(dst, ds, VID_X * 2, VID_Y * 2, VID_W * 2, VID_H * 2);
+    }
+    papp_disp_present(s);
+}
+
 static void message_screen(papp_surface_t *s, const char *l1, const char *l2)
 {
-    px = papp_disp_lock(s, &stride);
     fill(0, 0, W, H, C_BG);
     htext_center(&font_big, W / 2, 66, "רובוט תנועות ידיים", C_TEAL);
     htext_center(&font_small, W / 2, 112, l1, C_INK);
     if (l2) htext_center(&font_small, W / 2, 132, l2, C_MUTED);
     draw_x_button();
+    int ds;
+    uint16_t *dst = papp_disp_lock(s, &ds);
+    blit_ui(dst, ds);
     papp_disp_present(s);
 }
 
@@ -882,12 +981,22 @@ static void message_screen(papp_surface_t *s, const char *l1, const char *l2)
 int main(int argc, char **argv)
 {
     (void)argc; (void)argv;
-    papp_surface_cfg_t cfg = { .width = W, .height = H, .format = PAPP_PIXFMT_RGB565,
+    papp_surface_cfg_t cfg = { .width = SW, .height = SH, .format = PAPP_PIXFMT_RGB565,
                                .scale = PAPP_SCALE_FIT_ASPECT, .buffers = 2 };
     papp_surface_t *s = papp_disp_surface_create(&cfg);
     if (!s) return 2;
 
     mtx = papp_mutex_create(false);
+    vfront = papp_alloc(VMAX_W * VMAX_H * 2, PAPP_MEM_LARGE, 64);
+    vback  = papp_alloc(VMAX_W * VMAX_H * 2, PAPP_MEM_LARGE, 64);
+    if (!vfront || !vback) {
+        for (;;) {
+            message_screen(s, "אין מספיק זיכרון לווידאו", "לחצו X ליציאה");
+            if (papp_exit_requested() || read_touch(s)) return 0;
+            papp_delay_ms(30);
+        }
+    }
+
     memset(&sh, 0, sizeof(sh));
     strcpy(sh.robot, "stop");
     strcpy(sh.mode, "ai");
@@ -920,9 +1029,8 @@ int main(int argc, char **argv)
     while (!papp_exit_requested()) {
         read_pad();
         if (read_touch(s)) break;
-        px = papp_disp_lock(s, &stride);
-        render();
-        papp_disp_present(s);
+        if (!fullscreen) render();
+        present_frame(s);
     }
 
     /* let the robot stop if the joystick was driving */
