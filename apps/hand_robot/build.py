@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Hand Robot - shows the hand-gesture robot (detection + live video) and drives it with the joystick.
     python apps/hand_robot/build.py   -> build/apps/hand_robot/hand_robot.papp
-Needs apps/hand_robot/secret.h (copy secret.example.h)."""
+No password inside: the screen is paired once from the dashboard (see main.c)."""
 import os
 import sys
 

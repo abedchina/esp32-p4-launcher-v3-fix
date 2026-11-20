@@ -21,11 +21,14 @@
 #include <string.h>
 #include "tjpgd.h"
 
-#if __has_include("secret.h")
-#include "secret.h"
-#else
-#include "secret.example.h"
-#endif
+/* No password in this code (1.2.0): the app is shared in the Store. The first
+   time, the screen shows a 5-digit code; typed in the dashboard, the server
+   hands the password over, and it is kept on the SD card (KEY_PATH). */
+#define ROBOT_HOST "esp32-hand-robot-ai.onrender.com"
+#define KEY_DIR    "/sd/data/abed.handrobot"
+#define KEY_PATH   KEY_DIR "/key.txt"
+
+static char token[96];        /* the server password, from the SD card */
 
 PAPP_MANIFEST(.id = "abed.handrobot", .name = "Hand Robot", .version = PAPP_APP_VERSION, .main_stack = 32768);
 
@@ -373,8 +376,9 @@ static int http_once(conn_t *c, const char *method, const char *path, const char
     int blen = body ? (int)strlen(body) : 0;
     char *p = req;
     p = s_add(p, method); p = s_add(p, " "); p = s_add(p, path);
-    p = s_add(p, " HTTP/1.1\r\nHost: " ROBOT_HOST "\r\nX-Device-Token: " ROBOT_TOKEN
-                 "\r\nUser-Agent: hand-robot-p4\r\nConnection: keep-alive\r\n");
+    p = s_add(p, " HTTP/1.1\r\nHost: " ROBOT_HOST "\r\nX-Device-Token: ");
+    p = s_add(p, token);
+    p = s_add(p, "\r\nUser-Agent: hand-robot-p4\r\nConnection: keep-alive\r\n");
     if (body) {
         p = s_add(p, "Content-Type: application/json\r\nContent-Length: ");
         p = s_int(p, blen);
@@ -817,7 +821,7 @@ static void render(void)
     htext(&font_small, W - 36, 5, "רובוט תנועות ידיים", C_TEAL);
     {
         const char *ns = st.net == NS_ONLINE ? "מחובר לשרת" : st.net == NS_WAKING ? "השרת מתעורר..." :
-                         st.net == NS_TOKEN ? "סיסמה שגויה" : st.net == NS_ERROR ? "אין חיבור" : "מתחבר...";
+                         st.net == NS_TOKEN ? "החיבור בוטל - פתחו שוב" : st.net == NS_ERROR ? "אין חיבור" : "מתחבר...";
         uint16_t nc = st.net == NS_ONLINE ? C_GOOD : st.net == NS_CONNECTING || st.net == NS_START ? C_WARN : C_BAD;
         fill(8, 9, 7, 7, nc);
         htext_left(&font_small, 19, 5, ns, nc);
@@ -977,6 +981,118 @@ static void message_screen(papp_surface_t *s, const char *l1, const char *l2)
     papp_disp_present(s);
 }
 
+/* ══ password on the SD card + pairing ════════════════════════════════════ */
+static bool key_load(void)
+{
+    const papp_if_fs_t *fs = papp_fs();
+    token[0] = 0;
+    if (!fs) return false;
+    papp_file_t *f = fs->open(KEY_PATH, "rb");
+    if (!f) return false;
+    size_t n = fs->read(f, token, sizeof(token) - 1);
+    fs->close(f);
+    token[n] = 0;
+    while (n && (token[n - 1] == '\n' || token[n - 1] == '\r' || token[n - 1] == ' ')) token[--n] = 0;
+    return n > 0;
+}
+
+static void key_save(void)
+{
+    const papp_if_fs_t *fs = papp_fs();
+    if (!fs) return;
+    fs->mkdir("/sd/data");
+    fs->mkdir(KEY_DIR);
+    papp_file_t *f = fs->open(KEY_PATH, "wb");
+    if (!f) return;
+    fs->write(f, token, strlen(token));
+    fs->close(f);
+}
+
+static void key_forget(void)
+{
+    const papp_if_fs_t *fs = papp_fs();
+    if (fs) fs->remove(KEY_PATH);
+}
+
+/* only plain characters go into the HTTP header */
+static bool token_ok(const char *t)
+{
+    int n = 0;
+    for (; t[n]; n++) if (t[n] < 33 || t[n] > 126) return false;
+    return n > 0 && n < (int)sizeof(token);
+}
+
+static void pair_draw(papp_surface_t *s, const char *code, const char *line)
+{
+    fill(0, 0, W, H, C_BG);
+    draw_x_button();
+    htext_center(&font_big, W / 2, 22, "חיבור המסך לרובוט", C_TEAL);
+    if (code[0]) {
+        char spaced[16]; char *p = spaced;        /* "3 8 7 4 8" */
+        for (int i = 0; code[i] && i < 5; i++) { if (i) *p++ = ' '; *p++ = code[i]; }
+        *p = 0;
+        fill(W / 2 - 90, 62, 180, 46, C_CARD);
+        frame_rect(W / 2 - 90, 62, 180, 46, C_TEAL);
+        htext_center(&font_big, W / 2, 74, spaced, C_INK);
+    }
+    htext_center(&font_small, W / 2, 124, "1. במחשב: פתחו את דף הבקרה של הרובוט", C_INK);
+    htext_center(&font_small, W / 2, 144, "2. בתיבה 'חיבור מסך P4' הקלידו את הקוד", C_INK);
+    htext_center(&font_small, W / 2, 164, "3. לחצו 'חיבור' - המסך ממשיך לבד", C_INK);
+    htext_center(&font_small, W / 2, 196, line, C_MUTED);
+    int ds;
+    uint16_t *dst = papp_disp_lock(s, &ds);
+    blit_ui(dst, ds);
+    papp_disp_present(s);
+}
+
+/* true = got the password (saved on the SD card), false = the user left */
+static bool pair_screen(papp_surface_t *s)
+{
+    char pid[48] = "", code[8] = "", line[64];
+    strcpy(line, "מתחבר לשרת...");
+    int64_t next = 0, started = 0;
+    token[0] = 0;                            /* no password header while pairing */
+
+    for (;;) {
+        if (papp_exit_requested() || read_touch(s)) return false;
+        pair_draw(s, code, line);
+        int64_t now = papp_time_us();
+        if (now < next) { papp_delay_ms(30); continue; }
+
+        int len = 0, st;
+        if (!pid[0] || now - started > 540000000LL) {           /* new code (9 min) */
+            st = http(&cconn, "POST", "/pair/start", "{}", (uint8_t *)cbody, sizeof(cbody) - 1, &len);
+            if (st == 200) {
+                cbody[len] = 0;
+                get_str(cbody, cbody + len, "id", pid, sizeof(pid));
+                get_str(cbody, cbody + len, "code", code, sizeof(code));
+                started = papp_time_us();
+                strcpy(line, "ממתין לאישור מדף הבקרה...");
+            } else {
+                pid[0] = code[0] = 0;
+                strcpy(line, st >= 500 || st < 0 ? "השרת מתעורר... (עד דקה)" : "שגיאת שרת - מנסה שוב");
+            }
+        } else {
+            char path[96]; char *p = s_add(path, "/pair/status?id="); s_add(p, pid);
+            st = http(&cconn, "GET", path, NULL, (uint8_t *)cbody, sizeof(cbody) - 1, &len);
+            if (st == 200) {
+                cbody[len] = 0;
+                char status[16], tk[sizeof(token)];
+                get_str(cbody, cbody + len, "status", status, sizeof(status));
+                if (!strcmp(status, "approved") && get_str(cbody, cbody + len, "token", tk, sizeof(tk)) && token_ok(tk)) {
+                    strcpy(token, tk);
+                    key_save();
+                    conn_close(&cconn);
+                    return true;
+                }
+            } else if (st == 404) {
+                pid[0] = 0;                                      /* code expired: a new one */
+            }
+        }
+        next = papp_time_us() + 2000000;
+    }
+}
+
 /* ══ main ═════════════════════════════════════════════════════════════════ */
 int main(int argc, char **argv)
 {
@@ -1019,6 +1135,10 @@ int main(int argc, char **argv)
             }
         }
     }
+    /* the password: from the SD card, or pair this screen first */
+    if (!key_load() || !token_ok(token)) {
+        if (!pair_screen(s)) { papp_disp_surface_destroy(s); return 0; }
+    }
     message_screen(s, "מתחבר לשרת...", ROBOT_HOST);
 
     papp_thread_cfg_t tc = { .name = "hr_ctl", .stack_size = 16384, .prio = PAPP_PRIO_NORMAL, .core = -1 };
@@ -1026,9 +1146,12 @@ int main(int argc, char **argv)
     papp_thread_cfg_t tv = { .name = "hr_video", .stack_size = 16384, .prio = PAPP_PRIO_NORMAL, .core = -1 };
     papp_thread_t *t_vid = papp_thread_create(video_thread, NULL, &tv);
 
+    bool forgot = false;
     while (!papp_exit_requested()) {
         read_pad();
         if (read_touch(s)) break;
+        /* password changed on the server: forget it, the next start pairs again */
+        if (!forgot && sh.net == NS_TOKEN) { key_forget(); forgot = true; }
         if (!fullscreen) render();
         present_frame(s);
     }
