@@ -86,9 +86,30 @@ esp_err_t bsp_buttons_init(void)
     s_battery = adc_channel(BOARD_BATTERY_ADC, &s_ch_battery);
     if (s_battery) board_set_cap(BSP_CAP_BATTERY);
 
+    /* Some pads lose the R1 pull-down (bad joint on R2), so a failed detect alone
+     * does not disable the pad: with internal pull-downs on the analog pins, an
+     * absent pad reads ~0 everywhere, so the pad is enabled when they are quiet. */
     if (!pad_detect()) {
-        ESP_LOGI(TAG, "GPIO gamepad not connected (GPIO %d high with pull-up)", BOARD_PAD_DETECT);
-        return s_paddle ? ESP_OK : ESP_ERR_NOT_FOUND;
+        const int apins[] = { BOARD_PAD_JOY_LR, BOARD_PAD_JOY_UD, BOARD_PAD_AB };
+        adc_channel_t chs[3];
+        int worst = 0;
+        for (size_t i = 0; i < 3; i++) {
+            if (!adc_channel(apins[i], &chs[i])) { worst = 4095; continue; }
+            gpio_pulldown_en(apins[i]);         /* after the ADC setup, which clears pulls */
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+        for (size_t i = 0; i < 3 && worst < 4095; i++) {
+            int v = adc_read(chs[i]);
+            if (v > worst) worst = v;
+        }
+        for (size_t i = 0; i < 3; i++) gpio_pulldown_dis(apins[i]);
+        if (worst > 600) {
+            ESP_LOGI(TAG, "GPIO gamepad not connected (GPIO %d high with pull-up, analog %d)",
+                     BOARD_PAD_DETECT, worst);
+            return s_paddle ? ESP_OK : ESP_ERR_NOT_FOUND;
+        }
+        ESP_LOGW(TAG, "GPIO gamepad: GPIO %d high with pull-up (R2 pull-down missing?) - pad enabled anyway",
+                 BOARD_PAD_DETECT);
     }
 
     for (size_t i = 0; i < N_DIGITAL; i++) {
