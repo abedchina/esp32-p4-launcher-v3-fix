@@ -1,0 +1,6 @@
+name=Hand Robot
+task=yolo
+labels=forward,left,right,stop
+conf=0.3
+scale=0.0039215686
+offset=0
