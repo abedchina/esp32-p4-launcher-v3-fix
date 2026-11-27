@@ -339,11 +339,13 @@ static void draw_message(const char *a, const char *b)
 }
 
 /* ══ download models from GitHub ═════════════════════════════════════════ */
-/* The catalogue: models.txt on the "models" release, one model per line:
- *   <file>|<name shown>|<size in bytes>     (downloads <file>.espdl and <file>.txt) */
-#define MODELS_URL "https://github.com/abedchina/esp32-p4-launcher-v3-fix/releases/download/models/"
-#define MAXC 7
+/* Every <name>.espdl (+ <name>.txt) in the "models" folder of the GitHub repository; the folder
+ * is read with the GitHub API, so a model is added by uploading its files there. Models already
+ * on the card (same size) are not downloaded again. */
+#define MODELS_API "https://api.github.com/repos/abedchina/esp32-p4-launcher-v3-fix/contents/models"
+#define MAXC 16
 static uint8_t dlbuf[16384];
+static char listing[48 * 1024];
 
 static void progress(papp_surface_t *s, const char *title, long got, long total)
 {
@@ -363,7 +365,8 @@ static void progress(papp_surface_t *s, const char *title, long got, long total)
 static long http_get(const papp_if_net_t *net, const char *url, const char *path, char *mem, long memlen,
                      papp_surface_t *s, const char *title)
 {
-    papp_http_req_t rq = { .url = url, .timeout_ms = 20000 };
+    papp_http_req_t rq = { .url = url, .timeout_ms = 20000,
+                           .headers = "User-Agent: p4-ai-models\r\nAccept: application/vnd.github+json\r\n" };
     int st = 0;
     papp_http_t *h = net->http_open(&rq, &st);
     if (!h || st != 200) { if (h) net->http_close(h); return -1; }
@@ -380,9 +383,55 @@ static long http_get(const papp_if_net_t *net, const char *url, const char *path
     }
     net->http_close(h);
     if (f) fclose(f);
-    if (!path && got < memlen) mem[got] = 0;
+    if (!path) mem[got < memlen ? got : memlen - 1] = 0;
     if (n < 0 || (total > 0 && got != total)) { if (path) remove(path); return -3; }
     return got;
+}
+
+typedef struct { char base[48], url[200], txt_url[200]; long size; bool have; } remote_t;
+static remote_t rm[MAXC];
+
+/* the "models" folder listing (JSON array): every .espdl with its size and raw download URL */
+static int parse_listing(void)
+{
+    int n = 0;
+    char *p = listing;
+    while ((p = strstr(p, "\"name\":\"")) && n < MAXC) {
+        p += 8;
+        char *e = strchr(p, '"');
+        if (!e) break;
+        int len = (int)(e - p);
+        char name[96];
+        snprintf(name, sizeof name, "%.*s", len < 95 ? len : 95, p);
+        char *obj_end = strstr(e, "\"name\":\"");
+        char *sz = strstr(e, "\"size\":"), *du = strstr(e, "\"download_url\":\"");
+        p = e;
+        if (!sz || !du || (obj_end && du > obj_end)) continue;
+        size_t nl = strlen(name);
+        if (nl < 7 || strcasecmp(name + nl - 6, ".espdl")) continue;
+        remote_t *r = &rm[n];
+        snprintf(r->base, sizeof r->base, "%.*s", (int)(nl - 6), name);
+        r->size = atol(sz + 7);
+        du += 16;
+        char *de = strchr(du, '"');
+        if (!de) continue;
+        snprintf(r->url, sizeof r->url, "%.*s", (int)(de - du), du);
+        snprintf(r->txt_url, sizeof r->txt_url, "%.*s.txt", (int)(de - du) - 6, du);
+        char path[128];
+        snprintf(path, sizeof path, MODELS "/%s.espdl", r->base);
+        r->have = papp_fs()->size(path) == r->size;
+        n++;
+    }
+    return n;
+}
+
+static bool fetch_model(const papp_if_net_t *net, const remote_t *r, papp_surface_t *s, const char *title)
+{
+    char path[128];
+    snprintf(path, sizeof path, MODELS "/%s.txt", r->base);
+    if (strstr(listing, r->base) && strstr(listing, ".txt")) http_get(net, r->txt_url, path, NULL, 0, NULL, NULL);  /* optional */
+    snprintf(path, sizeof path, MODELS "/%s.espdl", r->base);
+    return http_get(net, r->url, path, NULL, 0, s, title) == r->size;
 }
 
 static void download_models(papp_surface_t *s)
@@ -393,45 +442,45 @@ static void download_models(papp_surface_t *s)
     draw_message("CONNECTING...", "WI-FI AND GITHUB");
     papp_disp_present(s);
     if (net->up(15000) < 0 && papp_ui_wifi() != 1) return;
-    static char cat[4096];
-    if (http_get(net, MODELS_URL "models.txt", NULL, cat, sizeof cat, NULL, NULL) < 0) {
-        papp_ui_message("AI Models", "Could not read the model list from GitHub. Check the Wi-Fi and try again.");
+    if (http_get(net, MODELS_API, NULL, listing, sizeof listing, NULL, NULL) < 0) {
+        papp_ui_message("AI Models", "Could not read the models folder on GitHub. Check the Wi-Fi and try again.");
         return;
     }
-    static char file[MAXC][48], name[MAXC][48], item[MAXC][64];
-    const char *items[MAXC];
-    long size[MAXC];
-    int n = 0;
-    for (char *line = strtok(cat, "\n"); line && n < MAXC; line = strtok(NULL, "\n")) {
-        trim(line);
-        char *a = strchr(line, '|');
-        if (!a || line[0] == '#') continue;
-        *a++ = 0;
-        char *b = strchr(a, '|');
-        if (b) *b++ = 0;
-        snprintf(file[n], sizeof file[n], "%s", line);
-        snprintf(name[n], sizeof name[n], "%s", a);
-        size[n] = b ? atol(b) : 0;
-        char path[128];
-        snprintf(path, sizeof path, MODELS "/%s.espdl", file[n]);
-        bool have = papp_fs()->size(path) == size[n] && size[n] > 0;
-        snprintf(item[n], sizeof item[n], "%s (%ld.%ld MB)%s", name[n], size[n] / 1000000, size[n] / 100000 % 10, have ? " - on the card" : "");
-        items[n] = item[n];
-        n++;
-    }
-    if (!n) { papp_ui_message("AI Models", "There are no models on GitHub yet."); return; }
-    int k = papp_ui_menu("Download a model", items, n, 0);
-    if (k < 0) return;
     papp_fs()->mkdir(MODELS);
-    char url[200], path[128];
-    snprintf(url, sizeof url, MODELS_URL "%s.txt", file[k]);
-    snprintf(path, sizeof path, MODELS "/%s.txt", file[k]);
-    http_get(net, url, path, NULL, 0, NULL, NULL);                       /* the description (optional) */
-    snprintf(url, sizeof url, MODELS_URL "%s.espdl", file[k]);
-    snprintf(path, sizeof path, MODELS "/%s.espdl", file[k]);
-    long got = http_get(net, url, path, NULL, 0, s, name[k]);
-    papp_ui_message("AI Models", got > 0 ? "The model is on the card. Choose \"Run a model\" to use it."
-                                         : "The download failed. Check the Wi-Fi and try again.");
+    for (;;) {
+        int n = parse_listing(), missing = 0;
+        if (!n) { papp_ui_message("AI Models", "The models folder on GitHub is empty."); return; }
+        static char item[MAXC + 1][72];
+        const char *items[MAXC + 1];
+        for (int i = 0; i < n; i++) missing += !rm[i].have;
+        int k0 = 0;
+        if (missing) { snprintf(item[0], sizeof item[0], "Download all new models (%d)", missing); items[0] = item[0]; k0 = 1; }
+        for (int i = 0; i < n && k0 + i < 7; i++) {
+            snprintf(item[k0 + i], sizeof item[0], "%s (%ld.%ld MB) - %s", rm[i].base, rm[i].size / 1000000,
+                     rm[i].size / 100000 % 10, rm[i].have ? "on the card" : "new");
+            items[k0 + i] = item[k0 + i];
+        }
+        int cnt = k0 + n > 7 ? 7 : k0 + n;
+        int k = papp_ui_menu(missing ? "Models on GitHub" : "All models are on the card", items, cnt, 0);
+        if (k < 0) return;
+        if (missing && k == 0) {
+            int done = 0, i_new = 0;
+            for (int i = 0; i < n; i++) {
+                if (rm[i].have) continue;
+                char t[80];
+                snprintf(t, sizeof t, "%d/%d %s", ++i_new, missing, rm[i].base);
+                done += fetch_model(net, &rm[i], s, t);
+            }
+            char msg[96];
+            snprintf(msg, sizeof msg, "%d of %d new models are on the card now.", done, missing);
+            papp_ui_message("AI Models", msg);
+            continue;
+        }
+        remote_t *r = &rm[k - k0];
+        if (r->have) { papp_ui_message("AI Models", "This model is already on the card."); continue; }
+        papp_ui_message("AI Models", fetch_model(net, r, s, r->base) ? "The model is on the card. Choose \"Run a model\" to use it."
+                                                                     : "The download failed. Check the Wi-Fi and try again.");
+    }
 }
 
 int main(int argc, char **argv)
