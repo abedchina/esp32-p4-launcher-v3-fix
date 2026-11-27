@@ -395,6 +395,7 @@ static const papp_iface_hdr_t *const s_registry[] = {
     &lx_if_ble.hdr,
 #endif
     &lx_if_cam.hdr,
+    &lx_if_ai.hdr,
 };
 
 void lx_svc_init(lx_app_log_sink_t log_sink)
@@ -453,6 +454,7 @@ void lx_svc_end_run(uint32_t *leaked_allocs, uint32_t *leaked_bytes, uint32_t *l
     lx_svc_net_end_run();       /* after the threads: none of them is in a call */
     lx_svc_ble_end_run();       /* advertising, connections, GATT table, host */
     lx_svc_cam_end_run();       /* the camera stream the app opened */
+    lx_svc_ai_end_run();        /* the model the app loaded */
     lx_ui_reset();              /* a browser the app was killed in */
     *leaked_allocs = na; *leaked_bytes = nb; *leaked_files = nf;
 }

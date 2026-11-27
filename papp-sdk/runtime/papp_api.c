@@ -17,6 +17,7 @@ papp_import_t __papp_imports[] = {
     { PAPP_IF_NET, 1, PAPP_IMPORT_OPTIONAL, 0 },             /* launcher 0.29+ */
     { PAPP_IF_BLE, 1, PAPP_IMPORT_OPTIONAL, 0 },             /* launcher 0.29+, boards with BLE */
     { PAPP_IF_CAM, 1, PAPP_IMPORT_OPTIONAL, 0 },             /* launcher 0.30+, USB camera */
+    { PAPP_IF_AI, 1, PAPP_IMPORT_OPTIONAL, 0 },              /* launcher 0.31+, ESP-DL models */
 };
 
 #define SYS ((const papp_if_sys_t *)__papp_imports[0].iface)
@@ -30,6 +31,7 @@ papp_import_t __papp_imports[] = {
 #define NET  ((const papp_if_net_t *)__papp_imports[8].iface)
 #define BLE  ((const papp_if_ble_t *)__papp_imports[9].iface)
 #define CAM  ((const papp_if_cam_t *)__papp_imports[10].iface)
+#define AI   ((const papp_if_ai_t *)__papp_imports[11].iface)
 
 const papp_if_sys_t *papp_if_sys(void) { return SYS; }
 const papp_if_mem_t *papp_if_mem(void) { return MEM; }
@@ -236,3 +238,7 @@ const papp_if_ble_t *papp_ble(void) { return BLE; }
 /* ── CAM ────────────────────────────────────────────────────────────────── */
 
 const papp_if_cam_t *papp_cam(void) { return CAM; }
+
+/* ── AI ─────────────────────────────────────────────────────────────────── */
+
+const papp_if_ai_t *papp_ai(void) { return AI; }

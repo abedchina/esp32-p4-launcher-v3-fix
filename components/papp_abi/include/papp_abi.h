@@ -816,6 +816,33 @@ typedef struct {
     int   (*frame)(uint16_t *dst, int w, int h, int stride, uint32_t *seq, uint32_t timeout_ms);
 } papp_if_cam_t;
 
+/* ── AI interface ───────────────────────────────────────────────────────── */
+/* One ESP-DL model (.espdl on the SD card) at a time, run on the P4 (launcher 0.31+).
+ * run() resizes an RGB565 picture into the model's int8 input (v = pixel * scale + offset,
+ * RGB, letterbox with grey 114 or stretch) and runs it; read() gives an output as floats.
+ * The model is unloaded at teardown. */
+
+#define PAPP_IF_AI        PAPP_FOURCC('A', 'I', ' ', ' ')
+#define PAPP_IF_AI_VER    1
+
+typedef struct {
+    int32_t ndim;
+    int32_t dims[4];                     /* input: N H W C                               */
+    int32_t exponent;                    /* real = int * 2^exponent                      */
+    int32_t dtype;                       /* 1 float, 3 int8, 5 int16                     */
+} papp_ai_shape_t;
+
+typedef struct {
+    papp_iface_hdr_t hdr;
+    int     (*load)(const char *path);   /* 0 ok, PAPP_E_* (NOT_FOUND = -13 style: < 0)  */
+    void    (*unload)(void);
+    int     (*input)(papp_ai_shape_t *out);
+    int     (*outputs)(void);
+    int     (*output)(int idx, papp_ai_shape_t *out);
+    int64_t (*run)(const uint16_t *img, int w, int h, int stride, float scale, float offset, int letterbox);  /* us, < 0 error */
+    int     (*read)(int idx, float *dst, int max);
+} papp_if_ai_t;
+
 /* ── Entry point ────────────────────────────────────────────────────────── */
 
 /* Provided by the SDK runtime (crt0), located at entry_off. */

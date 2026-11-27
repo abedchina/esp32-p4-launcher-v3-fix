@@ -36,6 +36,8 @@ extern const papp_if_net_t lx_if_net;
 extern const papp_if_ble_t lx_if_ble;     /* only on boards with BLE (lx_svc_ble_present) */
 extern const papp_if_cam_t lx_if_cam;     /* USB camera (lx_cam) */
 void lx_svc_cam_end_run(void);
+extern const papp_if_ai_t lx_if_ai;       /* ESP-DL models (lx_ai) */
+void lx_svc_ai_end_run(void);
 
 /* NET bookkeeping (lx_svc_net.c) */
 void lx_svc_net_init(void);
