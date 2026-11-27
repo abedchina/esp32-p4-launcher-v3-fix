@@ -339,13 +339,35 @@ static void draw_message(const char *a, const char *b)
 }
 
 /* ══ download models from GitHub ═════════════════════════════════════════ */
-/* Every <name>.espdl (+ <name>.txt) in the "models" folder of the GitHub repository; the folder
+/* Every <name>.espdl (+ <name>.txt) in the GitHub repository abedchina/AI-Models; it
  * is read with the GitHub API, so a model is added by uploading its files there. Models already
  * on the card (same size) are not downloaded again. */
-#define MODELS_API "https://api.github.com/repos/abedchina/esp32-p4-launcher-v3-fix/contents/models"
+#define MODELS_API "https://api.github.com/repos/abedchina/AI-Models/contents"
 #define MAXC 16
+#define TOKEN_FILE "/sd/config/github_token.txt"
 static uint8_t dlbuf[16384];
 static char listing[48 * 1024];
+static char hdr_json[300], hdr_raw[300];         /* "Authorization: Bearer <key>" + Accept */
+
+/* the private repository needs a read-only GitHub key, kept on the card */
+static bool load_token(void)
+{
+    char tok[200] = "";
+    FILE *f = fopen(TOKEN_FILE, "r");
+    if (f) { if (!fgets(tok, sizeof tok, f)) tok[0] = 0; fclose(f); }
+    trim(tok);
+    char *t = tok;
+    while (*t == ' ' || *t == '\t') t++;
+    const char *ua = "User-Agent: p4-ai-models\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
+    if (*t) {
+        snprintf(hdr_json, sizeof hdr_json, "%sAuthorization: Bearer %s\r\nAccept: application/vnd.github+json\r\n", ua, t);
+        snprintf(hdr_raw, sizeof hdr_raw, "%sAuthorization: Bearer %s\r\nAccept: application/vnd.github.raw\r\n", ua, t);
+    } else {
+        snprintf(hdr_json, sizeof hdr_json, "%sAccept: application/vnd.github+json\r\n", ua);
+        snprintf(hdr_raw, sizeof hdr_raw, "%sAccept: application/vnd.github.raw\r\n", ua);
+    }
+    return *t != 0;
+}
 
 static void progress(papp_surface_t *s, const char *title, long got, long total)
 {
@@ -365,8 +387,7 @@ static void progress(papp_surface_t *s, const char *title, long got, long total)
 static long http_get(const papp_if_net_t *net, const char *url, const char *path, char *mem, long memlen,
                      papp_surface_t *s, const char *title)
 {
-    papp_http_req_t rq = { .url = url, .timeout_ms = 20000,
-                           .headers = "User-Agent: p4-ai-models\r\nAccept: application/vnd.github+json\r\n" };
+    papp_http_req_t rq = { .url = url, .timeout_ms = 20000, .headers = path ? hdr_raw : hdr_json };
     int st = 0;
     papp_http_t *h = net->http_open(&rq, &st);
     if (!h || st != 200) { if (h) net->http_close(h); return -1; }
@@ -404,7 +425,7 @@ static int parse_listing(void)
         char name[96];
         snprintf(name, sizeof name, "%.*s", len < 95 ? len : 95, p);
         char *obj_end = strstr(e, "\"name\":\"");
-        char *sz = strstr(e, "\"size\":"), *du = strstr(e, "\"download_url\":\"");
+        char *sz = strstr(e, "\"size\":"), *du = strstr(e, "\"url\":\"");
         p = e;
         if (!sz || !du || (obj_end && du > obj_end)) continue;
         size_t nl = strlen(name);
@@ -412,11 +433,13 @@ static int parse_listing(void)
         remote_t *r = &rm[n];
         snprintf(r->base, sizeof r->base, "%.*s", (int)(nl - 6), name);
         r->size = atol(sz + 7);
-        du += 16;
+        du += 7;                                  /* "url":"https://api.github.com/repos/.../contents/x.espdl?ref=main" */
         char *de = strchr(du, '"');
         if (!de) continue;
         snprintf(r->url, sizeof r->url, "%.*s", (int)(de - du), du);
-        snprintf(r->txt_url, sizeof r->txt_url, "%.*s.txt", (int)(de - du) - 6, du);
+        char *ext = strstr(r->url, ".espdl");
+        if (ext) snprintf(r->txt_url, sizeof r->txt_url, "%.*s.txt%s", (int)(ext - r->url), r->url, ext + 6);
+        else r->txt_url[0] = 0;
         char path[128];
         snprintf(path, sizeof path, MODELS "/%s.espdl", r->base);
         r->have = papp_fs()->size(path) == r->size;
@@ -429,7 +452,7 @@ static bool fetch_model(const papp_if_net_t *net, const remote_t *r, papp_surfac
 {
     char path[128];
     snprintf(path, sizeof path, MODELS "/%s.txt", r->base);
-    if (strstr(listing, r->base) && strstr(listing, ".txt")) http_get(net, r->txt_url, path, NULL, 0, NULL, NULL);  /* optional */
+    if (r->txt_url[0]) http_get(net, r->txt_url, path, NULL, 0, NULL, NULL);   /* the description (optional) */
     snprintf(path, sizeof path, MODELS "/%s.espdl", r->base);
     return http_get(net, r->url, path, NULL, 0, s, title) == r->size;
 }
@@ -442,8 +465,10 @@ static void download_models(papp_surface_t *s)
     draw_message("CONNECTING...", "WI-FI AND GITHUB");
     papp_disp_present(s);
     if (net->up(15000) < 0 && papp_ui_wifi() != 1) return;
+    bool key = load_token();
     if (http_get(net, MODELS_API, NULL, listing, sizeof listing, NULL, NULL) < 0) {
-        papp_ui_message("AI Models", "Could not read the models folder on GitHub. Check the Wi-Fi and try again.");
+        papp_ui_message("AI Models", key ? "Could not read the models on GitHub. Check the Wi-Fi and the key in /sd/config/github_token.txt."
+                                         : "The models are private: put your GitHub key in /sd/config/github_token.txt (one line).");
         return;
     }
     papp_fs()->mkdir(MODELS);
