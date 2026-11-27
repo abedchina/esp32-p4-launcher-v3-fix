@@ -30,6 +30,8 @@ PAPP_MANIFEST(.id = "abed.aimodels", .name = "AI Models", .version = PAPP_APP_VE
 
 static uint16_t *px;
 static int stride;
+static uint16_t last[640 * 480];
+static bool have_last;
 
 /* ══ drawing ═════════════════════════════════════════════════════════════ */
 static inline uint16_t blend(uint16_t d, uint16_t s, int a)
@@ -434,6 +436,10 @@ int main(int argc, char **argv)
         }
         if (!cam_open) cam_open = cam->open(W, H, 0) >= 0;
         int r = cam->frame(px, W, H, stride, &seq, 200);
+        /* no new frame in time: show the last one again (the back buffer holds an older one = flicker) */
+        if (r == 1) for (int y = 0; y < H; y++) memcpy(&last[y * W], &px[y * stride], W * 2);
+        else if (have_last) for (int y = 0; y < H; y++) memcpy(&px[y * stride], &last[y * W], W * 2);
+        have_last |= r == 1;
         if (r == 1 && ai_state == 0) {           /* hand the AI thread a copy of this frame */
             for (int y = 0; y < H; y++) memcpy(&ai_frame[y * W], &px[y * stride], W * 2);
             ai_state = 1;

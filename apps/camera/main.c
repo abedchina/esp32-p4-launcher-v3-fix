@@ -15,6 +15,8 @@ PAPP_MANIFEST(.id = "abed.camera", .name = "Camera", .version = PAPP_APP_VERSION
 
 static uint16_t *px;
 static int stride;
+static uint16_t last[640 * 480];
+static bool have_last;
 
 static void rect(int x, int y, int w, int h, uint16_t c)
 {
@@ -124,6 +126,10 @@ int main(int argc, char **argv)
         px = papp_disp_lock(s, &stride);
         int r = cam->frame(px, W, H, stride, &seq, 200);
         if (r < 0) { papp_disp_present(s); open = false; papp_delay_ms(200); continue; }   /* try again */
+        /* no new frame in time: show the last one again (the back buffer holds an older one = flicker) */
+        if (r == 1) for (int y = 0; y < H; y++) memcpy(&last[y * W], &px[y * stride], W * 2);
+        else if (have_last) for (int y = 0; y < H; y++) memcpy(&px[y * stride], &last[y * W], W * 2);
+        have_last |= r == 1;
         cam->info(&info);
         num(12, 12, (int)(info.fps_x10 / 10));
         if (rec) {
