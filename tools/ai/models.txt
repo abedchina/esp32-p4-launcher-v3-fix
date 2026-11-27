@@ -1,0 +1,2 @@
+# AI models for the AI Models app: <file>|<name>|<size of <file>.espdl in bytes>
+hand_robot|Hand Robot - forward, left, right, stop|3258400

@@ -338,6 +338,102 @@ static void draw_message(const char *a, const char *b)
     btn_x();
 }
 
+/* ══ download models from GitHub ═════════════════════════════════════════ */
+/* The catalogue: models.txt on the "models" release, one model per line:
+ *   <file>|<name shown>|<size in bytes>     (downloads <file>.espdl and <file>.txt) */
+#define MODELS_URL "https://github.com/abedchina/esp32-p4-launcher-v3-fix/releases/download/models/"
+#define MAXC 7
+static uint8_t dlbuf[16384];
+
+static void progress(papp_surface_t *s, const char *title, long got, long total)
+{
+    px = papp_disp_lock(s, &stride);
+    rect(0, 0, W, H, PAPP_RGB565(12, 18, 34), 32);
+    text_c(150, title, 0xFFFF, 3);
+    rect(60, 230, W - 120, 34, PAPP_RGB565(40, 50, 80), 32);
+    if (total > 0) rect(64, 234, (int)((W - 128) * (double)got / total), 26, PAPP_RGB565(90, 220, 255), 32);
+    char b[48];
+    if (total > 0) snprintf(b, sizeof b, "%ld.%ld / %ld.%ld MB", got / 1000000, got / 100000 % 10, total / 1000000, total / 100000 % 10);
+    else snprintf(b, sizeof b, "%ld KB", got / 1000);
+    text_c(290, b, PAPP_RGB565(200, 210, 230), 2);
+    papp_disp_present(s);
+}
+
+/* GET url -> file (or into mem when path is NULL). Returns bytes, < 0 on error */
+static long http_get(const papp_if_net_t *net, const char *url, const char *path, char *mem, long memlen,
+                     papp_surface_t *s, const char *title)
+{
+    papp_http_req_t rq = { .url = url, .timeout_ms = 20000 };
+    int st = 0;
+    papp_http_t *h = net->http_open(&rq, &st);
+    if (!h || st != 200) { if (h) net->http_close(h); return -1; }
+    long total = net->http_length(h), got = 0, shown = -1;
+    FILE *f = path ? fopen(path, "wb") : NULL;
+    if (path && !f) { net->http_close(h); return -2; }
+    int n;
+    while ((n = net->http_read(h, dlbuf, sizeof dlbuf)) > 0) {
+        if (f) fwrite(dlbuf, 1, n, f);
+        else if (got + n < memlen) memcpy(mem + got, dlbuf, n);
+        got += n;
+        if (s && got - shown >= 64 * 1024) { progress(s, title, got, total); shown = got; }
+        if (papp_exit_requested()) { n = -1; break; }
+    }
+    net->http_close(h);
+    if (f) fclose(f);
+    if (!path && got < memlen) mem[got] = 0;
+    if (n < 0 || (total > 0 && got != total)) { if (path) remove(path); return -3; }
+    return got;
+}
+
+static void download_models(papp_surface_t *s)
+{
+    const papp_if_net_t *net = papp_net();
+    if (!net) { papp_ui_message("AI Models", "Update the launcher (Settings - Update) to download models."); return; }
+    px = papp_disp_lock(s, &stride);
+    draw_message("CONNECTING...", "WI-FI AND GITHUB");
+    papp_disp_present(s);
+    if (net->up(15000) < 0 && papp_ui_wifi() != 1) return;
+    static char cat[4096];
+    if (http_get(net, MODELS_URL "models.txt", NULL, cat, sizeof cat, NULL, NULL) < 0) {
+        papp_ui_message("AI Models", "Could not read the model list from GitHub. Check the Wi-Fi and try again.");
+        return;
+    }
+    static char file[MAXC][48], name[MAXC][48], item[MAXC][64];
+    const char *items[MAXC];
+    long size[MAXC];
+    int n = 0;
+    for (char *line = strtok(cat, "\n"); line && n < MAXC; line = strtok(NULL, "\n")) {
+        trim(line);
+        char *a = strchr(line, '|');
+        if (!a || line[0] == '#') continue;
+        *a++ = 0;
+        char *b = strchr(a, '|');
+        if (b) *b++ = 0;
+        snprintf(file[n], sizeof file[n], "%s", line);
+        snprintf(name[n], sizeof name[n], "%s", a);
+        size[n] = b ? atol(b) : 0;
+        char path[128];
+        snprintf(path, sizeof path, MODELS "/%s.espdl", file[n]);
+        bool have = papp_fs()->size(path) == size[n] && size[n] > 0;
+        snprintf(item[n], sizeof item[n], "%s (%ld.%ld MB)%s", name[n], size[n] / 1000000, size[n] / 100000 % 10, have ? " - on the card" : "");
+        items[n] = item[n];
+        n++;
+    }
+    if (!n) { papp_ui_message("AI Models", "There are no models on GitHub yet."); return; }
+    int k = papp_ui_menu("Download a model", items, n, 0);
+    if (k < 0) return;
+    papp_fs()->mkdir(MODELS);
+    char url[200], path[128];
+    snprintf(url, sizeof url, MODELS_URL "%s.txt", file[k]);
+    snprintf(path, sizeof path, MODELS "/%s.txt", file[k]);
+    http_get(net, url, path, NULL, 0, NULL, NULL);                       /* the description (optional) */
+    snprintf(url, sizeof url, MODELS_URL "%s.espdl", file[k]);
+    snprintf(path, sizeof path, MODELS "/%s.espdl", file[k]);
+    long got = http_get(net, url, path, NULL, 0, s, name[k]);
+    papp_ui_message("AI Models", got > 0 ? "The model is on the card. Choose \"Run a model\" to use it."
+                                         : "The download failed. Check the Wi-Fi and try again.");
+}
+
 int main(int argc, char **argv)
 {
     papp_surface_cfg_t cfg = { .width = W, .height = H, .format = PAPP_PIXFMT_RGB565, .scale = PAPP_SCALE_FIT_ASPECT, .buffers = 2 };
@@ -371,10 +467,17 @@ int main(int argc, char **argv)
             char path[256] = "";
             if (auto_path) { snprintf(path, sizeof path, "%s", auto_path); auto_path = NULL; }
             else {
+                static const char *const menu[] = { "Run a model", "Download models from GitHub", "Exit" };
+                px = papp_disp_lock(s, &stride);
+                draw_message("AI MODELS", "BY ABED MIHILIA");
+                papp_disp_present(s);
+                int m = papp_ui_menu("AI Models", menu, 3, 0);
+                if (m < 0 || m == 2) break;
+                if (m == 1) { download_models(s); continue; }
                 papp_fs()->mkdir(MODELS);
                 papp_pick_cfg_t pc = { .title = "AI Models", .root = MODELS, .extensions = ".espdl" };
                 papp_pick_result_t pr;
-                if (papp_ui_pick_file(&pc, &pr) == PAPP_PICK_CANCEL) break;     /* back out = exit the app */
+                if (papp_ui_pick_file(&pc, &pr) == PAPP_PICK_CANCEL) continue;  /* back to the menu */
                 snprintf(path, sizeof path, "%s", pr.path);
             }
             if (!load_desc(path, &model)) continue;
