@@ -196,6 +196,11 @@ const papp_if_net_t *papp_net(void);
  *   ble->adv_start(&a);    then wait_event() for CONNECTED / WRITE / SUBSCRIBE, notify() values */
 const papp_if_ble_t *papp_ble(void);
 
+/* The USB camera interface (papp_abi.h has the calls). NULL on a launcher before 0.30.
+ *   const papp_if_cam_t *cam = papp_cam();
+ *   if (cam && cam->open(640, 480, 0) >= 0) { uint32_t seq = 0; cam->frame(buf, w, h, stride, &seq, 100); } */
+const papp_if_cam_t *papp_cam(void);
+
 #define PAPP_BLE_UUID16(v) { 2, { (uint8_t)((v) & 0xFF), (uint8_t)((v) >> 8) } }
 
 /* Advertising data: appends one AD structure to buf (31 bytes at most); false if it doesn't fit */

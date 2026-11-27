@@ -785,6 +785,37 @@ typedef struct {
     int   (*set_name)(const char *name);                             /* GAP device name   */
 } papp_if_ble_t;
 
+/* ── CAM interface ──────────────────────────────────────────────────────── */
+/* A USB (UVC) camera on the board's USB host port (launcher 0.30+). The stream is
+ * MJPEG; frame() decodes the newest picture with the P4's JPEG engine and scales it
+ * into the app's buffer, jpeg() hands over the compressed picture (to send it on).
+ * The stream is closed at teardown. Results: >= 0 success, PAPP_E_* (NET) errors. */
+
+#define PAPP_IF_CAM       PAPP_FOURCC('C', 'A', 'M', ' ')
+#define PAPP_IF_CAM_VER   1
+
+typedef struct {
+    uint8_t  connected;                  /* a camera is plugged in                       */
+    uint8_t  streaming;
+    uint8_t  format;                     /* 1 = MJPEG                                    */
+    uint8_t  reserved;
+    uint16_t width, height;              /* of the running stream                        */
+    uint32_t frames;                     /* received since open                          */
+    uint32_t fps_x10;                    /* measured                                     */
+} papp_cam_info_t;
+
+typedef struct {
+    papp_iface_hdr_t hdr;
+    void  (*info)(papp_cam_info_t *out);
+    int   (*open)(int width, int height, int fps);       /* closest size; 0,0 = 640x480; fps 0 = default */
+    void  (*close)(void);
+    /* newest frame with a sequence number other than *seq: >0 bytes copied, 0 timeout,
+     * < 0 PAPP_E_NOMEM when it does not fit in max (PAPP_E_EXIT on exit) */
+    int   (*jpeg)(void *buf, uint32_t max, uint32_t *seq, uint32_t timeout_ms);
+    /* newest frame decoded into an RGB565 buffer (w x h, stride in pixels): 1 new frame, 0 timeout */
+    int   (*frame)(uint16_t *dst, int w, int h, int stride, uint32_t *seq, uint32_t timeout_ms);
+} papp_if_cam_t;
+
 /* ── Entry point ────────────────────────────────────────────────────────── */
 
 /* Provided by the SDK runtime (crt0), located at entry_off. */
