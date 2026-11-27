@@ -353,8 +353,15 @@ static char hdr_json[300], hdr_raw[300];         /* "Authorization: Bearer <key>
 static bool load_token(void)
 {
     char tok[200] = "";
-    FILE *f = fopen(TOKEN_FILE, "r");
-    if (f) { if (!fgets(tok, sizeof tok, f)) tok[0] = 0; fclose(f); }
+    /* also the names Windows makes with hidden extensions, and the card's main folder */
+    static const char *const paths[] = { TOKEN_FILE, TOKEN_FILE ".txt", "/sd/github_token.txt", "/sd/github_token.txt.txt",
+                                         "/sd/config/github_token", "/sd/github_token" };
+    for (unsigned i = 0; i < sizeof paths / sizeof paths[0] && !tok[0]; i++) {
+        FILE *f = fopen(paths[i], "r");
+        if (f) { if (!fgets(tok, sizeof tok, f)) tok[0] = 0; fclose(f); }
+    }
+    if ((unsigned char)tok[0] == 0xEF && (unsigned char)tok[1] == 0xBB && (unsigned char)tok[2] == 0xBF)   /* UTF-8 BOM (Notepad) */
+        memmove(tok, tok + 3, strlen(tok + 3) + 1);
     trim(tok);
     char *t = tok;
     while (*t == ' ' || *t == '\t') t++;
