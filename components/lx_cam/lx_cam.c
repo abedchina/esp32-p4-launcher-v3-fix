@@ -23,6 +23,8 @@ typedef struct { int type; uint8_t addr, idx; } cam_ev_t;
 static QueueHandle_t s_evq;
 static SemaphoreHandle_t s_lock;          /* the latest frame and the stream handle */
 static SemaphoreHandle_t s_dec_lock;      /* the JPEG decoder */
+static SemaphoreHandle_t s_oc_lock;       /* open / close run one at a time (two opens at once crash the USB stack) */
+static volatile int s_owner;              /* 0 none, 1 the startup probe, 2 an app */
 
 static uvc_host_frame_info_t s_list[MAX_FRAMES];
 static size_t s_list_n;
@@ -112,26 +114,30 @@ static void driver_cb(const uvc_host_driver_event_data_t *e, void *ctx)
 }
 
 /* ── stream ─────────────────────────────────────────────────────────────── */
-static void close_locked(void)
+static void close_stream(void)
 {
-    if (s_stream) {
-        uvc_host_stream_stop(s_stream);
-        uvc_host_stream_close(s_stream);
-        s_stream = NULL;
-    }
+    xSemaphoreTake(s_oc_lock, portMAX_DELAY);
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    uvc_host_stream_hdl_t h = s_stream;
+    s_stream = NULL;
     s_w = s_h = 0;
     s_fmt = 0;
+    xSemaphoreGive(s_lock);
+    if (h) {                                 /* outside s_lock: frame_cb may still be running */
+        uvc_host_stream_close(h);            /* stops the stream first */
+        vTaskDelay(pdMS_TO_TICKS(150));      /* let the camera settle before the next open */
+    }
+    s_owner = 0;
+    xSemaphoreGive(s_oc_lock);
 }
 
 void lx_cam_close(void)
 {
     if (!s_lock) return;
-    xSemaphoreTake(s_lock, portMAX_DELAY);
-    close_locked();
-    xSemaphoreGive(s_lock);
+    close_stream();
 }
 
-esp_err_t lx_cam_open(int w, int h, int fps)
+static esp_err_t open_stream(int w, int h, int fps, int owner)
 {
     if (!s_lock || !s_connected) return ESP_ERR_NOT_FOUND;
     if (w <= 0 || h <= 0) { w = 640; h = 480; }
@@ -147,12 +153,20 @@ esp_err_t lx_cam_open(int w, int h, int fps)
         ESP_LOGE(TAG, "the camera has no MJPEG format");
         return ESP_ERR_NOT_SUPPORTED;
     }
-    xSemaphoreTake(s_lock, portMAX_DELAY);
+    xSemaphoreTake(s_oc_lock, portMAX_DELAY);
     if (s_stream && s_w == s_list[best].h_res && s_h == s_list[best].v_res) {   /* already running */
-        xSemaphoreGive(s_lock);
+        if (owner > s_owner) s_owner = owner;  /* an app takes over the probe's stream */
+        xSemaphoreGive(s_oc_lock);
         return ESP_OK;
     }
-    close_locked();
+    if (s_stream) {
+        uvc_host_stream_hdl_t old = s_stream;
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_stream = NULL;
+        xSemaphoreGive(s_lock);
+        uvc_host_stream_close(old);
+        vTaskDelay(pdMS_TO_TICKS(150));
+    }
     uvc_host_stream_config_t cfg = {
         .event_cb = stream_cb,
         .frame_cb = frame_cb,
@@ -162,7 +176,6 @@ esp_err_t lx_cam_open(int w, int h, int fps)
                       .number_of_urbs = 3, .urb_size = 0 },
     };
     uvc_host_stream_hdl_t hdl = NULL;
-    xSemaphoreGive(s_lock);               /* frame_cb takes it: never hold it across open/start */
     esp_err_t err = uvc_host_stream_open(&cfg, pdMS_TO_TICKS(3000), &hdl);
     if (err == ESP_OK) {
         s_frames = 0; s_fps_cnt = 0; s_fps_x10 = 0; s_fps_t0 = esp_timer_get_time();
@@ -175,13 +188,17 @@ esp_err_t lx_cam_open(int w, int h, int fps)
         s_w = s_list[best].h_res;
         s_h = s_list[best].v_res;
         s_fmt = 1;
+        s_owner = owner;
         ESP_LOGI(TAG, "streaming MJPEG %ux%u", s_w, s_h);
     } else {
         ESP_LOGE(TAG, "stream %ux%u failed: %s", s_list[best].h_res, s_list[best].v_res, esp_err_to_name(err));
     }
     xSemaphoreGive(s_lock);
+    xSemaphoreGive(s_oc_lock);
     return err;
 }
+
+esp_err_t lx_cam_open(int w, int h, int fps) { return open_stream(w, h, fps, 2); }
 
 void lx_cam_state(lx_cam_state_t *o)
 {
@@ -247,8 +264,9 @@ int lx_cam_frame(uint16_t *dst, int w, int h, int stride, uint32_t *seq, int tim
         if (esp_timer_get_time() >= end || !s_stream) { ret = 0; goto out; }
         vTaskDelay(pdMS_TO_TICKS(4));
     }
-    if (!len) goto out;
+    if (!len) { ret = 0; goto out; }
     jpeg_decode_picture_info_t pi;
+    ret = 0;                                 /* from here, a bad frame is just skipped */
     if (jpeg_decoder_get_info(s_dec_in, len, &pi) != ESP_OK || !pi.width || !pi.height) goto out;
     uint32_t pw = (pi.width + 15) & ~15u, ph = (pi.height + 15) & ~15u;
     size_t need = (size_t)pw * ph * 2;
@@ -438,7 +456,7 @@ static void cam_task(void *arg)
             ESP_LOGI(TAG, "camera connected (addr %u, %u formats)", s_addr, (unsigned)n);
             write_status("probe=running\n");
             /* a 3 s test stream, unless an app already opened one */
-            if (!s_stream && lx_cam_open(640, 480, 0) == ESP_OK) {
+            if (!s_stream && open_stream(640, 480, 0, 1) == ESP_OK) {
                 vTaskDelay(pdMS_TO_TICKS(3000));
                 char line[160];
                 snprintf(line, sizeof line, "probe=ok %ux%u frames=%lu fps=%lu.%lu last_jpeg=%lu bytes\n",
@@ -451,13 +469,13 @@ static void cam_task(void *arg)
                 uint32_t sq = 0;
                 int n = snap ? lx_cam_jpeg(snap, 512 * 1024, &sq, 500) : 0;
                 if (n > 0) { FILE *f = fopen("/sd/launcher/camera.jpg", "wb"); if (f) { fwrite(snap, 1, n, f); fclose(f); } }
-                lx_cam_close();
+                if (s_owner == 1) lx_cam_close();      /* never an app's stream */
             } else if (!s_stream) {
                 write_status("probe=failed (no MJPEG stream)\n");
             }
         } else if (ev.type == EV_DISCONNECTED) {
             ESP_LOGI(TAG, "camera disconnected");
-            lx_cam_close();
+            lx_cam_close();                          /* close of a gone device only frees it */
             s_connected = false;
             s_list_n = 0;
             write_status("disconnected\n");
@@ -474,7 +492,8 @@ esp_err_t lx_cam_start(void)
     s_evq = xQueueCreate(4, sizeof(cam_ev_t));
     s_lock = xSemaphoreCreateMutex();
     s_dec_lock = xSemaphoreCreateMutex();
-    if (!s_evq || !s_lock || !s_dec_lock) return ESP_ERR_NO_MEM;
+    s_oc_lock = xSemaphoreCreateMutex();
+    if (!s_evq || !s_lock || !s_dec_lock || !s_oc_lock) return ESP_ERR_NO_MEM;
     const uvc_host_driver_config_t cfg = {
         .driver_task_stack_size = 6 * 1024,
         .driver_task_priority = 6,

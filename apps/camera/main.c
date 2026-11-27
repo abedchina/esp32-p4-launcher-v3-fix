@@ -1,9 +1,12 @@
 ﻿/*
  * Camera - live video from a USB (UVC) camera on the board's USB host port (launcher 0.30+).
- * By Abed Mihilia. X (top right) exits.
+ * By Abed Mihilia. X (top right) exits. Tap the picture = record: a JPEG every 0.5 s to
+ * /sd/capture/IMG_nnnn.jpg (pictures for training / calibrating AI models); tap again = stop.
  */
 #include "papp/papp.h"
+#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 
 PAPP_MANIFEST(.id = "abed.camera", .name = "Camera", .version = PAPP_APP_VERSION, .main_stack = 16384);
 
@@ -43,6 +46,34 @@ static void num(int x, int y, int v)
     }
 }
 
+static uint8_t jpg[256 * 1024];
+static int rec_count;
+
+static int next_index(void)
+{
+    char path[64];
+    for (int i = 1; i < 100000; i++) {
+        snprintf(path, sizeof path, "/sd/capture/IMG_%04d.jpg", i);
+        struct stat st;
+        if (stat(path, &st) != 0) return i;
+    }
+    return 1;
+}
+
+static void save_jpeg(const papp_if_cam_t *cam, int *idx)
+{
+    uint32_t sq = 0;
+    int n = cam->jpeg(jpg, sizeof jpg, &sq, 200);
+    if (n <= 0) return;
+    char path[64];
+    snprintf(path, sizeof path, "/sd/capture/IMG_%04d.jpg", (*idx)++);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(jpg, 1, n, f);
+    fclose(f);
+    rec_count++;
+}
+
 static void message(papp_surface_t *s, uint16_t bg)
 {
     px = papp_disp_lock(s, &stride);
@@ -65,13 +96,20 @@ int main(int argc, char **argv)
     const papp_if_cam_t *cam = papp_cam();
     bool open = false;
     uint32_t seq = 0;
-    int64_t t_try = 0;
+    int64_t t_try = 0, t_save = 0;
+    bool rec = false, was_touch = false;
+    int idx = 1;
     while (!papp_exit_requested()) {
         papp_touch_point_t tp[3];
         int n = papp_disp_touch(s, tp, 3);
-        bool quit = false;
-        for (int i = 0; i < n; i++) if (tp[i].x > W - 60 && tp[i].y < 60) quit = true;
+        bool quit = false, tap = false;
+        for (int i = 0; i < n; i++) { if (tp[i].x > W - 60 && tp[i].y < 60) quit = true; else tap = true; }
         if (quit) break;
+        if (tap && !was_touch && open) {
+            rec = !rec;
+            if (rec) { mkdir("/sd/capture", 0777); idx = next_index(); rec_count = 0; t_save = 0; }
+        }
+        was_touch = n > 0;
         if (!cam) { message(s, PAPP_RGB565(90, 20, 20)); papp_delay_ms(100); continue; }   /* launcher too old */
         papp_cam_info_t info;
         cam->info(&info);
@@ -85,9 +123,17 @@ int main(int argc, char **argv)
         }
         px = papp_disp_lock(s, &stride);
         int r = cam->frame(px, W, H, stride, &seq, 200);
-        if (r < 0) { papp_disp_present(s); break; }
+        if (r < 0) { papp_disp_present(s); open = false; papp_delay_ms(200); continue; }   /* try again */
         cam->info(&info);
         num(12, 12, (int)(info.fps_x10 / 10));
+        if (rec) {
+            int64_t now = papp_time_us();
+            if (now - t_save >= 500000) { t_save = now; save_jpeg(cam, &idx); }
+            for (int y = -9; y <= 9; y++)            /* red REC dot + number of pictures */
+                for (int x = -9; x <= 9; x++)
+                    if (x * x + y * y <= 81) px[(H - 30 + y) * stride + 30 + x] = PAPP_RGB565(255, 40, 40);
+            num(52, H - 40, rec_count);
+        }
         draw_x();
         papp_disp_present(s);
     }
