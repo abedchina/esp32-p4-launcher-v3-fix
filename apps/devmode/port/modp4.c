@@ -8,6 +8,11 @@
  *   p4.ai.top()                     # ("closed", 0.88) or None
  *   p4.ai.result()                  # [("closed", 0.88, x, y, w, h), ...]  (640 x 480 picture)
  *   p4.ai.count("car")  p4.ai.labels()  p4.ai.ms()  p4.ai.stop()
+ *   p4.ai.conf(0.4)                 # threshold from the next picture on; conf() reads it
+ *   p4.ai.zone(160, 120, 320, 240)  # a rectangle on the picture (drawn on the screen)
+ *   p4.ai.inside("pen")             # a pen in the zone now
+ *   p4.ai.entered("pen")            # True ONCE each time a pen comes into the zone
+ *   p4.ai.left("pen")               # True ONCE each time it goes out (missing 2 results)
  *
  * The camera runs in the screen thread (live picture with boxes on the board's screen),
  * the model on core 1 in its own thread; Python only reads the latest result, so a
@@ -51,6 +56,17 @@ static det_t s_res[2][MAXD];
 static volatile int s_res_n[2], s_res_i;
 static volatile int64_t s_ms;
 static int64_t s_since[MAXL];                   /* label present since (us), 0 = not now */
+
+/* zone: a rectangle on the 640 x 480 picture. A label is "inside" while the centre of one of
+ * its boxes is in it; entering counts at once, leaving after it was missing from the zone in
+ * 2 results in a row (one missed detection is not a departure). Python takes each event once. */
+#define ZONE_OUT_RESULTS 2
+static volatile int s_zx = 0, s_zy = 0, s_zw = CW, s_zh = CH;
+static volatile bool s_zone_set;
+static bool s_in[MAXL];
+static int s_miss[MAXL];
+static volatile uint32_t s_ev_in[MAXL], s_ev_out[MAXL];
+static uint32_t s_took_in[MAXL], s_took_out[MAXL];
 static float *s_obuf[MAXO], *s_out0;
 static int s_osz[MAXO], s_nout, s_out0_n, in_w = 320, in_h = 320;
 static papp_ai_shape_t s_oshape[MAXO];
@@ -192,11 +208,24 @@ static int ai_thread(void *arg)
         int nxt = s_res_i ^ 1;
         s_res_n[nxt] = us >= 0 ? decode(s_res[nxt]) : 0;
         int64_t now = papp_time_us();
+        int zx = s_zx, zy = s_zy, zw = s_zw, zh = s_zh;
         for (int l = 0; l < M.nlabels && l < MAXL; l++) {
-            bool here = false;
-            for (int i = 0; i < s_res_n[nxt]; i++) here |= s_res[nxt][i].cls == l;
+            bool here = false, inz = false;
+            for (int i = 0; i < s_res_n[nxt]; i++) {
+                const det_t *d = &s_res[nxt][i];
+                if (d->cls != l) continue;
+                here = true;
+                if (M.task == 1 || (d->x >= zx && d->x < zx + zw && d->y >= zy && d->y < zy + zh)) inz = true;
+            }
             if (!here) s_since[l] = 0;
             else if (!s_since[l]) s_since[l] = now;
+            if (inz) {
+                s_miss[l] = 0;
+                if (!s_in[l]) { s_in[l] = true; s_ev_in[l]++; }
+            } else if (s_in[l] && ++s_miss[l] >= ZONE_OUT_RESULTS) {
+                s_in[l] = false;
+                s_ev_out[l]++;
+            }
         }
         s_res_i = nxt;
         s_ms = us / 1000;
@@ -259,24 +288,119 @@ void dm_ai_stop(void)
     papp_free(s_frame); s_frame = NULL;
     s_res_n[0] = s_res_n[1] = 0;
     memset(s_since, 0, sizeof s_since);
+    memset(s_in, 0, sizeof s_in);
+    memset(s_miss, 0, sizeof s_miss);
+    for (int l = 0; l < MAXL; l++) { s_ev_in[l] = s_ev_out[l] = 0; s_took_in[l] = s_took_out[l] = 0; }
+    s_zx = 0; s_zy = 0; s_zw = CW; s_zh = CH; s_zone_set = false;
 }
+
+/* "Hand Robot", "hand robot", "hand_robot", "hand_robot.espdl" -> "hand_robot": the file name,
+ * or the name= of a model's .txt (what the AI Models app shows), compared without case,
+ * spaces, '_' and '-'. */
+static void squash(const char *s, char *out, size_t n)
+{
+    size_t o = 0;
+    for (; *s && o + 1 < n; s++) {
+        char c = *s;
+        if (c == ' ' || c == '_' || c == '-') continue;
+        out[o++] = (char)(c >= 'A' && c <= 'Z' ? c + 32 : c);
+    }
+    out[o] = 0;
+}
+
+static bool model_title(const char *txt, char *title, size_t n)
+{
+    title[0] = 0;
+    papp_file_t *f = papp_fs()->open(txt, "rb");
+    if (!f) return false;
+    char buf[512];
+    size_t len = papp_fs()->read(f, buf, sizeof buf - 1);
+    papp_fs()->close(f);
+    buf[len] = 0;
+    char *p = strstr(buf, "name=");
+    if (!p || (p != buf && p[-1] != '\n')) return false;
+    p += 5;
+    size_t l = strcspn(p, "\r\n");
+    snprintf(title, n, "%.*s", (int)(l < n ? l : n - 1), p);
+    return true;
+}
+
+static bool resolve_model(const char *name, char *base, size_t n)
+{
+    char want[96], fn[96], path[160];
+    const char *b = name[0] == '/' ? strrchr(name, '/') : NULL;   /* a path; "Eyes open/closed" is a name */
+    snprintf(fn, sizeof fn, "%s", b ? b + 1 : name);
+    size_t l = strlen(fn);
+    if (l > 6 && !strcasecmp(fn + l - 6, ".espdl")) fn[l - 6] = 0;
+    snprintf(path, sizeof path, "/sd/models/%s.espdl", fn);
+    if (papp_fs()->size(path) >= 0) { snprintf(base, n, "%s", fn); return true; }
+    squash(fn, want, sizeof want);
+    const papp_if_fs_t *fs = papp_fs();
+    if (fs->hdr.version < 2) return false;
+    papp_dir_t *d = fs->dir_open("/sd/models");
+    if (!d) return false;
+    papp_dirent_t e;
+    bool found = false;
+    while (!found && fs->dir_read(d, &e) == 1) {
+        size_t el = strlen(e.name);
+        if (e.is_dir || el < 7 || strcasecmp(e.name + el - 6, ".espdl")) continue;
+        char eb[96], sq[96], title[64], txt[192];
+        snprintf(eb, sizeof eb, "%.*s", (int)(el - 6), e.name);
+        squash(eb, sq, sizeof sq);
+        if (!strcmp(sq, want)) found = true;                 /* "hand robot" -> hand_robot */
+        else {
+            snprintf(txt, sizeof txt, "/sd/models/%s.txt", eb);
+            if (model_title(txt, title, sizeof title)) {
+                squash(title, sq, sizeof sq);
+                found = !strcmp(sq, want);                    /* "Hand Robot" (its name=) */
+            }
+        }
+        if (found) snprintf(base, n, "%s", eb);
+    }
+    fs->dir_close(d);
+    return found;
+}
+
+/* models() -> [("hand_robot", "Hand Robot"), ...]: what p4.ai.load() can open */
+static mp_obj_t ai_models(void)
+{
+    mp_obj_t list = mp_obj_new_list(0, NULL);
+    const papp_if_fs_t *fs = papp_fs();
+    if (fs->hdr.version < 2) return list;
+    papp_dir_t *d = fs->dir_open("/sd/models");
+    if (!d) return list;
+    papp_dirent_t e;
+    while (fs->dir_read(d, &e) == 1) {
+        size_t el = strlen(e.name);
+        if (e.is_dir || el < 7 || strcasecmp(e.name + el - 6, ".espdl")) continue;
+        char eb[96], title[64], txt[192];
+        snprintf(eb, sizeof eb, "%.*s", (int)(el - 6), e.name);
+        snprintf(txt, sizeof txt, "/sd/models/%s.txt", eb);
+        if (!model_title(txt, title, sizeof title)) snprintf(title, sizeof title, "%s", eb);
+        mp_obj_t t[2] = { mp_obj_new_str(eb, strlen(eb)), mp_obj_new_str(title, strlen(title)) };
+        mp_obj_list_append(list, mp_obj_new_tuple(2, t));
+    }
+    fs->dir_close(d);
+    return list;
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(ai_models_obj, ai_models);
 
 static mp_obj_t ai_load(size_t n_args, const mp_obj_t *args)
 {
     ai = papp_ai();
     cam = papp_cam();
     if (!ai || !cam) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("update the launcher (0.33 or newer)"));
+    int zx = s_zx, zy = s_zy, zw = s_zw, zh = s_zh;          /* a zone set before load() stays */
+    bool zset = s_zone_set;
     dm_ai_stop();
+    s_zx = zx; s_zy = zy; s_zw = zw; s_zh = zh; s_zone_set = zset;
     const char *name = mp_obj_str_get_str(args[0]);
     char base[96], path[128], txt[128];
-    const char *b = strrchr(name, '/');
-    snprintf(base, sizeof base, "%s", b ? b + 1 : name);
-    size_t l = strlen(base);
-    if (l > 6 && !strcasecmp(base + l - 6, ".espdl")) base[l - 6] = 0;
+    if (!resolve_model(name, base, sizeof base))
+        mp_raise_msg_varg(&mp_type_OSError,
+                          MP_ERROR_TEXT("no model '%s' on the card - see p4.ai.models() (or download it in AI Models)"), name);
     snprintf(path, sizeof path, "/sd/models/%s.espdl", base);
     snprintf(txt, sizeof txt, "/sd/models/%s.txt", base);
-    if (papp_fs()->size(path) < 0)
-        mp_raise_msg_varg(&mp_type_OSError, MP_ERROR_TEXT("no model %s (download it in the AI Models app)"), path);
     read_desc(txt);
     if (M.task > 1) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("hand / face models are not supported in Python yet"));
     if (n_args > 1) M.conf = mp_obj_get_float(args[1]);
@@ -390,6 +514,62 @@ static MP_DEFINE_CONST_FUN_OBJ_0(ai_labels_obj, ai_labels);
 static mp_obj_t ai_ms(void) { return MP_OBJ_NEW_SMALL_INT((int)s_ms); }
 static MP_DEFINE_CONST_FUN_OBJ_0(ai_ms_obj, ai_ms);
 
+/* conf()       -> the threshold now;  conf(0.4) -> new threshold from the next picture on */
+static mp_obj_t ai_conf(size_t n_args, const mp_obj_t *args)
+{
+    need_model();
+    if (n_args == 0) return mp_obj_new_float(M.conf);
+    mp_float_t c = mp_obj_get_float(args[0]);
+    if (c <= 0 || c >= 1) mp_raise_ValueError(MP_ERROR_TEXT("conf is between 0 and 1, e.g. 0.4"));
+    M.conf = (float)c;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ai_conf_obj, 0, 1, ai_conf);
+
+/* zone(x, y, w, h) on the 640 x 480 picture; zone() = the whole picture again */
+static mp_obj_t ai_zone(size_t n_args, const mp_obj_t *args)
+{
+    if (n_args == 0) { s_zx = 0; s_zy = 0; s_zw = CW; s_zh = CH; s_zone_set = false; return mp_const_none; }
+    if (n_args != 4) mp_raise_TypeError(MP_ERROR_TEXT("zone(x, y, w, h) - the picture is 640 x 480"));
+    int x = mp_obj_get_int(args[0]), y = mp_obj_get_int(args[1]), w = mp_obj_get_int(args[2]), h = mp_obj_get_int(args[3]);
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > CW) w = CW - x;
+    if (y + h > CH) h = CH - y;
+    if (w <= 0 || h <= 0) mp_raise_ValueError(MP_ERROR_TEXT("the zone is outside the 640 x 480 picture"));
+    s_zx = x; s_zy = y; s_zw = w; s_zh = h;
+    s_zone_set = true;
+    return mp_const_none;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ai_zone_obj, 0, 4, ai_zone);
+
+static mp_obj_t ai_inside(mp_obj_t lab)
+{
+    need_model();
+    return mp_obj_new_bool(s_in[label_index(lab)]);
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ai_inside_obj, ai_inside);
+
+static mp_obj_t ai_entered(mp_obj_t lab)                   /* True once per entry */
+{
+    need_model();
+    int l = label_index(lab);
+    if (s_took_in[l] == s_ev_in[l]) return mp_const_false;
+    s_took_in[l]++;
+    return mp_const_true;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ai_entered_obj, ai_entered);
+
+static mp_obj_t ai_left(mp_obj_t lab)                      /* True once per exit */
+{
+    need_model();
+    int l = label_index(lab);
+    if (s_took_out[l] == s_ev_out[l]) return mp_const_false;
+    s_took_out[l]++;
+    return mp_const_true;
+}
+static MP_DEFINE_CONST_FUN_OBJ_1(ai_left_obj, ai_left);
+
 static const mp_rom_map_elem_t ai_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR___name__), MP_ROM_QSTR(MP_QSTR_ai) },
     { MP_ROM_QSTR(MP_QSTR_load), MP_ROM_PTR(&ai_load_obj) },
@@ -400,6 +580,12 @@ static const mp_rom_map_elem_t ai_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_count), MP_ROM_PTR(&ai_count_obj) },
     { MP_ROM_QSTR(MP_QSTR_labels), MP_ROM_PTR(&ai_labels_obj) },
     { MP_ROM_QSTR(MP_QSTR_ms), MP_ROM_PTR(&ai_ms_obj) },
+    { MP_ROM_QSTR(MP_QSTR_conf), MP_ROM_PTR(&ai_conf_obj) },
+    { MP_ROM_QSTR(MP_QSTR_models), MP_ROM_PTR(&ai_models_obj) },
+    { MP_ROM_QSTR(MP_QSTR_zone), MP_ROM_PTR(&ai_zone_obj) },
+    { MP_ROM_QSTR(MP_QSTR_inside), MP_ROM_PTR(&ai_inside_obj) },
+    { MP_ROM_QSTR(MP_QSTR_entered), MP_ROM_PTR(&ai_entered_obj) },
+    { MP_ROM_QSTR(MP_QSTR_left), MP_ROM_PTR(&ai_left_obj) },
 };
 static MP_DEFINE_CONST_DICT(ai_globals, ai_globals_table);
 static const mp_obj_module_t p4_ai_module = { .base = { &mp_type_module }, .globals = (mp_obj_dict_t *)&ai_globals };
@@ -468,9 +654,20 @@ static int ai_draw(uint16_t *px, int stride, void (*rect)(int, int, int, int, ui
         rect(x, y > 20 ? y - 20 : y, (int)strlen(b) * 12 + 6, 20, c);
         text(x + 3, (y > 20 ? y - 20 : y) + 3, b, 0x0000, 2);
     }
+    if (s_zone_set) {                                        /* the zone: yellow, green with something in it */
+        bool any = false;
+        for (int l = 0; l < M.nlabels && l < MAXL; l++) any |= s_in[l];
+        uint16_t zc = any ? PAPP_RGB565(60, 255, 90) : PAPP_RGB565(255, 220, 40);
+        int x = s_zx, y = s_zy, w = s_zw, h = s_zh;
+        for (int t = 0; t < 4; t += 2) {                     /* dashed-looking double line */
+            rect(x + t, y + t, w - 2 * t, 2, zc); rect(x + t, y + h - 2 - t, w - 2 * t, 2, zc);
+            rect(x + t, y + t, 2, h - 2 * t, zc); rect(x + w - 2 - t, y + t, 2, h - 2 * t, zc);
+        }
+        text(x + 6, y + 6, any ? "ZONE - INSIDE" : "ZONE", zc, 2);
+    }
     char b[64];
     if (M.task == 1 && n) snprintf(b, sizeof b, "%s %d%%", M.labels[s_res[i0][0].cls % MAXL], (int)(s_res[i0][0].score * 100));
-    else snprintf(b, sizeof b, "%s  AI %dMS", M.name, (int)s_ms);
+    else snprintf(b, sizeof b, "%s  AI %dMS  CONF %d%%", M.name, (int)s_ms, (int)(M.conf * 100 + 0.5f));
     rect(0, CH - 26, CW, 26, 0x0000);
     text(8, CH - 20, b, PAPP_RGB565(170, 255, 200), 2);
     return 1;

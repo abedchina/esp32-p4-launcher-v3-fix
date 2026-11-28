@@ -135,10 +135,17 @@ static int boot_vprintf(const char *fmt, va_list ap)
     return s_boot_next(fmt, ap);
 }
 
+static bool s_drv_installed;
+
 void lx_devlink_early_init(void)
 {
     s_boot = heap_caps_malloc(BOOTLOG_SIZE, MALLOC_CAP_SPIRAM);
     if (s_boot) s_boot_next = esp_log_set_vprintf(boot_vprintf);
+    /* The port's driver goes in first thing: a PC that writes while the launcher boots (Thonny
+     * resets the board when it connects, then sends Ctrl+C / raw-mode right away) fills the
+     * 40 KB RX buffer instead of the 64-byte hardware FIFO, so its writes don't time out. */
+    usb_serial_jtag_driver_config_t cfg = { .rx_buffer_size = 40 * 1024, .tx_buffer_size = 16 * 1024 };
+    s_drv_installed = usb_serial_jtag_driver_install(&cfg) == ESP_OK;
 }
 
 /* ── Log forwarding ─────────────────────────────────────────────────────── */
@@ -775,14 +782,17 @@ void lx_devlink_app_exited(const char *path, int code, bool forced,
 
 esp_err_t lx_devlink_start(void)
 {
-    usb_serial_jtag_driver_config_t cfg = {
-        .rx_buffer_size = 40 * 1024,
-        .tx_buffer_size = 16 * 1024,
-    };
-    esp_err_t err = usb_serial_jtag_driver_install(&cfg);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "USB-Serial-JTAG driver install failed: %s", esp_err_to_name(err));
-        return err;
+    if (!s_drv_installed) {                          /* normally done in lx_devlink_early_init() */
+        usb_serial_jtag_driver_config_t cfg = {
+            .rx_buffer_size = 40 * 1024,
+            .tx_buffer_size = 16 * 1024,
+        };
+        esp_err_t err = usb_serial_jtag_driver_install(&cfg);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "USB-Serial-JTAG driver install failed: %s", esp_err_to_name(err));
+            return err;
+        }
+        s_drv_installed = true;
     }
     s_rx = heap_caps_malloc(DL_MAX_PAYLOAD + 1, MALLOC_CAP_SPIRAM);
     s_tx = heap_caps_malloc(DL_MAX_PAYLOAD, MALLOC_CAP_SPIRAM);
