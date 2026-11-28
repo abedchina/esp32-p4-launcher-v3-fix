@@ -239,6 +239,12 @@ static int decode(det_t *out)
     if (ai->output(0, &s) < 0) return 0;
     if (cur->task == 1) {                        /* classification: best class */
         int n = ai->read(0, outbuf, out_n);
+        if (n == 1) {                            /* one output = two classes with a sigmoid (labels: no,yes) */
+            float p = outbuf[0];
+            if (p < 0 || p > 1) p = sigm(p);
+            out[0] = (det_t){ 0.5f, 0.5f, 0, 0, p >= 0.5f ? p : 1 - p, p >= 0.5f };
+            return 1;
+        }
         int best = 0;
         for (int i = 1; i < n; i++) if (outbuf[i] > outbuf[best]) best = i;
         float sum = 0, mx = outbuf[best];

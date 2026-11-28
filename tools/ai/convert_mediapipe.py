@@ -178,24 +178,12 @@ def main():
     name = 'finger_counter' if kind == 'hand' else 'driver_drowsiness'
     os.replace(os.path.join(out, kind + '_det.espdl'), os.path.join(out, name + '.espdl'))
     os.replace(os.path.join(out, kind + '_lm.espdl'), os.path.join(out, name + '.lm'))
-    with open(os.path.join(out, name + '.txt'), 'w', encoding='utf-8', newline='
-') as t:
-        if kind == 'hand':
-            t.write('name=Finger Counter
-task=hands
-conf=0.5
-scale=0.0039215686
-offset=0
-')
-        else:
-            t.write('name=Driver Drowsiness
-task=face
-conf=0.5
-scale=0.0078431373
-offset=-1
-closed=0.2
-seconds=5
-')
+    if kind == 'hand':
+        desc = ['name=Finger Counter', 'task=hands', 'conf=0.5', 'scale=0.0039215686', 'offset=0']
+    else:
+        desc = ['name=Driver Drowsiness', 'task=face', 'conf=0.5', 'scale=0.0078431373', 'offset=-1', 'closed=0.2', 'seconds=5']
+    with open(os.path.join(out, name + '.txt'), 'w', encoding='utf-8', newline='') as t:
+        t.write(''.join(line + chr(10) for line in desc))
     print('files', name + '.espdl', name + '.lm', name + '.txt')
     print('done', out)
 

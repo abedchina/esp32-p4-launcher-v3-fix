@@ -46,5 +46,6 @@ if __name__ == '__main__':
         for ext in ('.espdl', '.txt'):
             if not os.path.exists(base + ext):
                 raise SystemExit('missing ' + base + ext)
-        for ext in ('.espdl', '.txt'):
-            upload(base + ext)
+        for ext in ('.espdl', '.lm', '.txt'):              # .lm = landmark model of hands / face models
+            if os.path.exists(base + ext):
+                upload(base + ext)
