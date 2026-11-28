@@ -96,7 +96,7 @@ def top(outs, nc):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('model'); ap.add_argument('name'); ap.add_argument('calib', nargs='+')
-    ap.add_argument('--size', type=int, default=0); ap.add_argument('--labels', default='')
+    ap.add_argument('--size', type=int, default=320); ap.add_argument('--labels', default='')
     ap.add_argument('--keep', default='', help='class ids to keep, e.g. 2,5')
     ap.add_argument('--title', default=''); ap.add_argument('--conf', type=float, default=0.3)
     a = ap.parse_args()
