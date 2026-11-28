@@ -53,9 +53,12 @@ static uint32_t s_put_size, s_put_crc, s_put_done, s_put_crc_run;
 
 /* ── Framing ────────────────────────────────────────────────────────────── */
 
+static volatile bool s_tty_open;     /* an app holds the port as a byte stream (see TTY below) */
+
 static bool host_alive(void)
 {
-    return usb_serial_jtag_is_connected() &&
+    /* no LOG / EVENT frames into a REPL (Thonny would print them); replies still go */
+    return !s_tty_open && usb_serial_jtag_is_connected() &&
            esp_timer_get_time() - s_last_host_us < HOST_ALIVE_US;
 }
 
@@ -627,7 +630,6 @@ static void dispatch(uint8_t type, uint16_t seq, uint8_t *p, uint32_t len)
 #define TTY_FRAME_MS  300                /* gap that ends a frame candidate in TTY mode */
 
 static StreamBufferHandle_t s_tty_rx;
-static volatile bool s_tty_open;
 
 static void tty_push(const uint8_t *p, size_t n)
 {

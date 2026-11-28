@@ -34,7 +34,7 @@ SOURCES += [os.path.join(MP, "shared", "runtime", f) for f in (
     "pyexec.c", "interrupt_char.c", "stdout_helpers.c", "sys_stdio_mphal.c", "gchelper_generic.c")]
 SOURCES += [os.path.join(MP, "shared", "readline", "readline.c"),
             os.path.join(MP, "shared", "timeutils", "timeutils.c")]
-SOURCES += [os.path.join(HERE, "port", f) for f in ("mphal.c", "modos.c", "modmachine.c")]
+SOURCES += [os.path.join(HERE, "port", f) for f in ("mphal.c", "modos.c", "modmachine.c", "modp4.c")]
 SOURCES += [os.path.join(HERE, "main.c")]
 
 INCLUDES = [os.path.join(HERE, "port"), HERE, MP, GEN]

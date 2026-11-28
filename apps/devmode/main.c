@@ -10,6 +10,7 @@
  * Screen: what Python prints, and STOP (Ctrl+C), RUN MAIN.PY (soft reset), X (exit).
  */
 #include <string.h>
+#include <stdio.h>
 #include <ctype.h>
 #include "py/compile.h"
 #include "py/runtime.h"
@@ -32,7 +33,7 @@ PAPP_MANIFEST(.id = "abed.devmode", .name = "Developer Mode", .version = PAPP_AP
 #define W 800
 #define H 480
 
-/* â•â• console mirror â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+/* == console mirror == */
 #define COLS 64
 #define ROWS 22
 static char con[ROWS][COLS + 1];
@@ -76,7 +77,7 @@ void dm_activity(int what)
     else if (what == DM_ACT_RUN) t_run = now;
 }
 
-/* â•â• drawing (5x7 font) â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+/* == drawing (5x7 font) == */
 static uint16_t *px;
 static int stride;
 
@@ -155,6 +156,44 @@ static bool hit(const btn_t *b, int x, int y) { return x >= b->x && x < b->x + b
 
 static volatile bool ui_run;
 
+/* camera view (a model is loaded from Python): picture left, buttons + console right */
+static const btn_t B_STOP2 = { 648, 60, 146, 44, "STOP", PAPP_RGB565(200, 30, 40) };
+static const btn_t B_RUN2  = { 648, 112, 146, 44, "MAIN.PY", PAPP_RGB565(40, 110, 200) };
+
+static void draw_x(void)
+{
+    rect(W - 52, 6, 44, 44, PAPP_RGB565(20, 30, 50));
+    for (int k = 0; k < 24; k++) { rect(W - 42 + k, 16 + k, 3, 3, 0xFFFF); rect(W - 42 + k, 39 - k, 3, 3, 0xFFFF); }
+}
+
+static void draw_camera_view(papp_surface_t *s)
+{
+    px = papp_disp_lock(s, &stride);
+    int r = dm_ai_draw(px, stride, rect, text);
+    if (r == 0) return;                                             /* no new frame: keep the last one */
+    if (r < 0) {
+        rect(0, 0, 640, H, C_BG);
+        text(40, 200, "CONNECT A USB CAMERA", PAPP_RGB565(255, 190, 90), 3);
+        text(40, 240, "TO THE HIGH-SPEED USB-C PORT", PAPP_RGB565(170, 190, 220), 2);
+    }
+    rect(640, 0, W - 640, H, C_BAR);
+    text(648, 22, "PYTHON", 0xFFFF, 2);
+    draw_x();
+    button(&B_STOP2);
+    button(&B_RUN2);
+    if (con_lock) papp_mutex_lock(con_lock);
+    for (int k = 0; k < 24; k++) {                                  /* the console's last lines, small */
+        int row = ROWS - 24 + k;
+        if (row < 0) continue;
+        char line[27];
+        snprintf(line, sizeof line, "%.26s", con[row]);
+        text(646, 168 + k * 13, line, C_CON, 1);
+    }
+    if (con_lock) papp_mutex_unlock(con_lock);
+    papp_disp_present(s);
+    if (r < 0) papp_delay_ms(100);
+}
+
 static int ui_thread(void *arg)
 {
     papp_surface_t *s = arg;
@@ -163,14 +202,15 @@ static int ui_thread(void *arg)
     while (ui_run) {
         papp_touch_point_t tp;
         int n = papp_disp_touch(s, &tp, 1);
+        bool camv = dm_ai_active();
         if (n > 0 && !was) {
             if (tp.x > W - 56 && tp.y < 56) {                       /* X: leave Developer Mode */
                 dm_quit = true;
                 mp_sched_keyboard_interrupt();
-            } else if (hit(&B_STOP, tp.x, tp.y)) {                  /* Ctrl+C */
+            } else if (hit(camv ? &B_STOP2 : &B_STOP, tp.x, tp.y)) {  /* Ctrl+C */
                 mp_sched_keyboard_interrupt();
                 dm_activity(DM_ACT_STOP);
-            } else if (hit(&B_RUN, tp.x, tp.y)) {                   /* stop + soft reset = run main.py */
+            } else if (hit(camv ? &B_RUN2 : &B_RUN, tp.x, tp.y)) {    /* stop + soft reset = run main.py */
                 mp_sched_keyboard_interrupt();
                 papp_delay_ms(50);
                 dm_feed("\x02\x04");                                /* friendly REPL, Ctrl+D */
@@ -178,6 +218,7 @@ static int ui_thread(void *arg)
             }
         }
         was = n > 0;
+        if (camv) { draw_camera_view(s); t_draw = 0; continue; }
         int64_t now = papp_time_us();
         if (!con_dirty && now - t_draw < 250000) { papp_delay_ms(20); continue; }
         con_dirty = 0;
@@ -206,7 +247,7 @@ static int ui_thread(void *arg)
     return 0;
 }
 
-/* â•â• MicroPython glue â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â• */
+/* == MicroPython glue == */
 void gc_collect(void)
 {
     gc_collect_start();
@@ -271,6 +312,7 @@ int main(int argc, char **argv)
                 if (pyexec_friendly_repl() != 0) break;
             }
         }
+        dm_ai_stop();                                               /* model + camera off */
         dm_machine_reset();                                         /* pins / buses off */
         gc_sweep_all();
         mp_deinit();
