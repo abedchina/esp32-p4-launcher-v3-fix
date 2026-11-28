@@ -178,7 +178,10 @@ static papp_thread_t *thrd_create(const papp_thread_cfg_t *cfg, papp_thread_fn_t
     papp_thread_t *t = heap_caps_calloc(1, sizeof(*t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (t) {
         t->tcb = heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-        t->stack = heap_caps_malloc(stack, psram ? MALLOC_CAP_SPIRAM : (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        /* SIMD: not the LP (RTC) RAM, where the P4's vector instructions (ESP-DL) fault;
+         * no room inside -> PSRAM instead of failing */
+        t->stack = psram ? NULL : heap_caps_malloc(stack, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_SIMD);
+        if (!t->stack) t->stack = heap_caps_malloc(stack, MALLOC_CAP_SPIRAM);
     }
     int slot = -1;
     if (t && t->tcb && t->stack) {

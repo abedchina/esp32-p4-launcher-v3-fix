@@ -1,9 +1,10 @@
-/* lx_ai: one ESP-DL model for apps, see lx_ai.h */
+/* lx_ai: ESP-DL models for apps (up to LX_AI_SLOTS loaded at once), see lx_ai.h */
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
 #include <new>
 #include <vector>
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -12,8 +13,11 @@
 #include "lx_ai.h"
 
 static const char *TAG = "lx_ai";
-static dl::Model *s_model;
-static std::vector<dl::TensorBase *> s_outs;
+static dl::Model *s_models[LX_AI_SLOTS];
+static std::vector<dl::TensorBase *> s_outv[LX_AI_SLOTS];
+static int s_cur;                                    /* selected slot: all calls below work on it */
+#define s_model s_models[s_cur]
+#define s_outs  s_outv[s_cur]
 static SemaphoreHandle_t s_lock;
 
 static void lock(void)
@@ -47,7 +51,16 @@ extern "C" esp_err_t lx_ai_load(const char *path)
     lock();
     unload_locked();
     int64_t t0 = esp_timer_get_time();
+    /* ESP-DL takes "internal" RAM for its buffers; the LP (RTC) RAM counts as internal but the vector
+     * instructions fault there (load access fault in the kernels) -> keep it busy while the model loads */
+    void *lp[4] = {};
+    for (int i = 0; i < 4; i++) {
+        size_t big = heap_caps_get_largest_free_block(MALLOC_CAP_RTCRAM);
+        if (big < 64) break;
+        lp[i] = heap_caps_malloc(big, MALLOC_CAP_RTCRAM);
+    }
     s_model = new (std::nothrow) dl::Model(path, fbs::MODEL_LOCATION_IN_SDCARD);
+    for (int i = 0; i < 4; i++) heap_caps_free(lp[i]);
     if (!s_model || s_model->get_inputs().empty() || s_model->get_outputs().empty()) {
         ESP_LOGE(TAG, "cannot load %s", path);
         unload_locked();
@@ -64,6 +77,24 @@ extern "C" void lx_ai_unload(void)
 {
     lock();
     unload_locked();
+    unlock();
+}
+
+extern "C" int lx_ai_select(int slot)
+{
+    if (slot < 0 || slot >= LX_AI_SLOTS) return -1;
+    lock();
+    int prev = s_cur;
+    s_cur = slot;
+    unlock();
+    return prev;
+}
+
+extern "C" void lx_ai_unload_all(void)
+{
+    lock();
+    for (int i = 0; i < LX_AI_SLOTS; i++) { s_cur = i; unload_locked(); }
+    s_cur = 0;
     unlock();
 }
 

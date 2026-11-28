@@ -15,7 +15,11 @@ typedef struct {
     int     dtype;             /* 1 float, 3 int8, 5 int16 */
 } lx_ai_shape_t;
 
-esp_err_t lx_ai_load(const char *path);                 /* one model at a time; replaces the loaded one */
+#define LX_AI_SLOTS 4
+/* models live in slots 0..3; every call works on the selected slot (default 0) */
+int       lx_ai_select(int slot);                       /* returns the previous slot, -1 = bad slot */
+void      lx_ai_unload_all(void);
+esp_err_t lx_ai_load(const char *path);                 /* replaces the model in the selected slot */
 void      lx_ai_unload(void);
 int       lx_ai_input(lx_ai_shape_t *out);              /* 0 = ok */
 int       lx_ai_outputs(void);                          /* number of outputs */

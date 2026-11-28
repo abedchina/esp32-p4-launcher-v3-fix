@@ -402,7 +402,8 @@ esp_err_t lx_app_launch(const char *path, int argc, const char *const *argv,
                      (unsigned long)stack, psram_stack ? "PSRAM" : "internal");
 
     a->argv = build_argv(path, argc, argv, &a->argc);
-    a->stack = heap_caps_malloc(stack, psram_stack ? MALLOC_CAP_SPIRAM : (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    a->stack = heap_caps_malloc(stack, psram_stack ? MALLOC_CAP_SPIRAM
+                                                   : (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT | MALLOC_CAP_SIMD));   /* not LP RAM */
     a->tcb = heap_caps_calloc(1, sizeof(StaticTask_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!a->argv || !a->stack || !a->tcb) {
         app_free(a);

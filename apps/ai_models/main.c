@@ -5,7 +5,8 @@
  *
  * A model = <name>.espdl + optional <name>.txt:
  *   name=Hand Robot
- *   task=yolo            (yolo: [1, 4+classes, N] or [1, N, 4+classes]; cls: [1, classes])
+ *   task=yolo            (yolo: [1, 4+classes, N] or [1, N, 4+classes]; cls: [1, classes];
+ *                         hands / face: MediaPipe detector + <name>.lm landmark model, see pose.c)
  *   labels=forward,left,right,stop
  *   conf=0.5
  *   scale=0.0039215686   (input = pixel * scale + offset; YOLO: /255)
@@ -113,8 +114,8 @@ static void btn_back(void)
 /* ══ models ══════════════════════════════════════════════════════════════ */
 typedef struct {
     char file[96], name[40], labels[MAXL][24];
-    int nlabels, task;          /* 0 yolo, 1 cls */
-    float conf, scale, offset;
+    int nlabels, task;          /* 0 yolo, 1 cls, 2 hands, 3 face */
+    float conf, scale, offset, closed, seconds;
 } model_t;
 static model_t model;
 
@@ -134,7 +135,7 @@ static bool load_desc(const char *path, model_t *m)
     size_t l = strlen(base);
     if (l < 7 || strcasecmp(base + l - 6, ".espdl")) return false;
     snprintf(m->name, sizeof m->name, "%.*s", (int)(l - 6), base);
-    m->conf = 0.5f; m->scale = 1.0f / 255.0f; m->offset = 0;
+    m->conf = 0.5f; m->scale = 1.0f / 255.0f; m->offset = 0; m->closed = 0.2f; m->seconds = 5;
     char txt[110];
     snprintf(txt, sizeof txt, "%.*s.txt", (int)(strlen(path) - 6), path);
     FILE *f = fopen(txt, "r");
@@ -146,7 +147,9 @@ static bool load_desc(const char *path, model_t *m)
         if (!v) continue;
         *v++ = 0;
         if (!strcmp(line, "name")) snprintf(m->name, sizeof m->name, "%s", v);
-        else if (!strcmp(line, "task")) m->task = !strcmp(v, "cls");
+        else if (!strcmp(line, "task")) m->task = !strcmp(v, "cls") ? 1 : !strcmp(v, "hands") ? 2 : !strcmp(v, "face") ? 3 : 0;
+        else if (!strcmp(line, "closed")) m->closed = strtof(v, NULL);
+        else if (!strcmp(line, "seconds")) m->seconds = strtof(v, NULL);
         else if (!strcmp(line, "conf")) m->conf = strtof(v, NULL);
         else if (!strcmp(line, "scale")) m->scale = strtof(v, NULL);
         else if (!strcmp(line, "offset")) m->offset = strtof(v, NULL);
@@ -317,6 +320,8 @@ static int ai_thread(void *arg)
     return 0;
 }
 
+#include "pose.c"
+
 /* ══ screens ═════════════════════════════════════════════════════════════ */
 static const uint16_t COLS[] = { 0x07E0, 0xF81F, 0xFFE0, 0x07FF, 0xFD20, 0x801F, 0xF800, 0x041F };
 
@@ -458,6 +463,16 @@ static bool fetch_model(const papp_if_net_t *net, const remote_t *r, papp_surfac
     char path[128];
     snprintf(path, sizeof path, MODELS "/%s.txt", r->base);
     if (r->txt_url[0]) http_get(net, r->txt_url, path, NULL, 0, NULL, NULL);   /* the description (optional) */
+    char lm_name[80], lm_url[200];                    /* hands / face models: the landmark model <base>.lm */
+    snprintf(lm_name, sizeof lm_name, "\"name\":\"%s.lm\"", r->base);
+    char *ext = strstr(r->url, ".espdl");
+    if (strstr(listing, lm_name) && ext) {
+        snprintf(lm_url, sizeof lm_url, "%.*s.lm%s", (int)(ext - r->url), r->url, ext + 6);
+        snprintf(path, sizeof path, MODELS "/%s.lm", r->base);
+        char t[80];
+        snprintf(t, sizeof t, "%s (2/2)", title);
+        if (http_get(net, lm_url, path, NULL, 0, s, t) <= 0) return false;
+    }
     snprintf(path, sizeof path, MODELS "/%s.espdl", r->base);
     return http_get(net, r->url, path, NULL, 0, s, title) == r->size;
 }
@@ -564,6 +579,23 @@ int main(int argc, char **argv)
             px = papp_disp_lock(s, &stride);
             draw_message("LOADING...", cur->name);
             papp_disp_present(s);
+            if (cur->task >= TASK_HANDS) {              /* detector + landmark model */
+                int e = pose_load();
+                if (e < 0) {
+                    ai_unload_all();
+                    px = papp_disp_lock(s, &stride);
+                    draw_message(e == -2 ? "UPDATE THE LAUNCHER" : "CANNOT LOAD MODEL", e == -2 ? "SETTINGS - UPDATE (0.32 OR NEWER)" : cur->file);
+                    papp_disp_present(s);
+                    papp_delay_ms(2500);
+                    continue;
+                }
+                ai_us = 0; ai_state = 0; ai_run_flag = true;
+                papp_thread_cfg_t tc = { .name = "ai", .stack_size = 16384, .prio = PAPP_PRIO_LOW, .core = 1 };
+                th = papp_thread_create(pose_thread, NULL, &tc);
+                if (!th) { tc.flags |= PAPP_THREAD_STACK_PSRAM; th = papp_thread_create(pose_thread, NULL, &tc); }   /* internal RAM full */
+                screen = RUN;
+                continue;
+            }
             if (ai->load(cur->file) < 0) {
                 px = papp_disp_lock(s, &stride);
                 draw_message("CANNOT LOAD MODEL", cur->file);
@@ -592,6 +624,7 @@ int main(int argc, char **argv)
             ai_run_flag = true;
             papp_thread_cfg_t tc = { .name = "ai", .stack_size = 16384, .prio = PAPP_PRIO_LOW, .core = 1 };   /* core 0 = screen loop */
             th = papp_thread_create(ai_thread, NULL, &tc);
+            if (!th) { tc.flags |= PAPP_THREAD_STACK_PSRAM; th = papp_thread_create(ai_thread, NULL, &tc); }
             screen = RUN;
             continue;
         }
@@ -600,7 +633,7 @@ int main(int argc, char **argv)
             ai_run_flag = false;
             if (th) papp_thread_join(th, 5000, NULL);
             th = NULL;
-            ai->unload();
+            ai_unload_all();
             cam->close(); cam_open = false;
             screen = LIST;
             continue;
@@ -622,6 +655,7 @@ int main(int argc, char **argv)
         if (r != 1) continue;
         if (ai_state == 0) {                     /* hand the AI thread a copy of this frame */
             for (int y = 0; y < H; y++) memcpy(&ai_frame[y * W], &px[y * stride], W * 2);
+            pose_frame_t = papp_time_us();
             ai_state = 1;
         }
         /* results */
@@ -636,9 +670,16 @@ int main(int argc, char **argv)
             rect(bx, by - 26 < 0 ? by : by - 26, tw(b, 3) + 10, 26, c, 26);
             text(bx + 5, (by - 26 < 0 ? by : by - 26) + 3, b, 0x0000, 3);
         }
-        rect(0, H - 64, W, 64, 0x0000, 16);
-        if (k > 0) { label_of(&d[0], b, sizeof b); text_c(H - 52, b, COLS[d[0].cls % 8], 5); }
-        else text_c(H - 44, "...", PAPP_RGB565(200, 200, 200), 4);
+        if (cur->task >= TASK_HANDS) {
+            uint16_t lc;
+            pose_draw(b, sizeof b, &lc);
+            rect(0, H - 64, W, 64, 0x0000, 16);
+            text_c(H - 52, b, lc, strlen(b) > 16 ? 3 : 5);
+        } else {
+            rect(0, H - 64, W, 64, 0x0000, 16);
+            if (k > 0) { label_of(&d[0], b, sizeof b); text_c(H - 52, b, COLS[d[0].cls % 8], 5); }
+            else text_c(H - 44, "...", PAPP_RGB565(200, 200, 200), 4);
+        }
         if (++frames, papp_time_us() - t_fps > 1000000) { fps = frames; frames = 0; t_fps = papp_time_us(); }
         snprintf(b, sizeof b, "%s  AI %dMS  %dFPS", cur->name, (int)(ai_us / 1000), fps);
         rect(60, 8, W - 120, 30, 0x0000, 14);
@@ -649,7 +690,7 @@ int main(int argc, char **argv)
     }
     ai_run_flag = false;
     if (th) papp_thread_join(th, 5000, NULL);
-    if (ai) ai->unload();
+    ai_unload_all();
     if (cam) cam->close();
     free(outbuf);
     for (int o = 0; o < MAXO; o++) free(obuf[o]);

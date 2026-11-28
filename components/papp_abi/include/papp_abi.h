@@ -823,7 +823,7 @@ typedef struct {
  * The model is unloaded at teardown. */
 
 #define PAPP_IF_AI        PAPP_FOURCC('A', 'I', ' ', ' ')
-#define PAPP_IF_AI_VER    1
+#define PAPP_IF_AI_VER    2                 /* v2 (0.32): select() = up to 4 models at once */
 
 typedef struct {
     int32_t ndim;
@@ -841,6 +841,9 @@ typedef struct {
     int     (*output)(int idx, papp_ai_shape_t *out);
     int64_t (*run)(const uint16_t *img, int w, int h, int stride, float scale, float offset, int letterbox);  /* us, < 0 error */
     int     (*read)(int idx, float *dst, int max);
+    /* v2: models live in slots 0..3, every call above works on the selected slot (default 0).
+     * Returns the previous slot, < 0 = bad slot. Check hdr.version >= 2 before calling. */
+    int     (*select)(int slot);
 } papp_if_ai_t;
 
 /* ── Entry point ────────────────────────────────────────────────────────── */

@@ -1,4 +1,4 @@
-/* AI service: one ESP-DL model for apps (lx_ai). The model is unloaded at teardown. */
+/* AI service: ESP-DL models for apps (lx_ai, up to 4 slots). Everything is unloaded at teardown. */
 #include <string.h>
 #include "lx_services.h"
 #include "lx_ai.h"
@@ -19,7 +19,7 @@ static int ai_load(const char *path)
     if (!path) return PAPP_E_UNSUPPORTED;
     SVC_ENTER();
     esp_err_t e = lx_ai_load(path);
-    s_loaded = e == ESP_OK;
+    s_loaded |= e == ESP_OK;              /* other slots may hold models too */
     SVC_LEAVE();
     return e == ESP_OK ? PAPP_E_OK : e == ESP_ERR_NOT_FOUND ? PAPP_E_NOT_CONNECTED : PAPP_E_UNSUPPORTED;
 }
@@ -27,8 +27,7 @@ static int ai_load(const char *path)
 static void ai_unload(void)
 {
     SVC_ENTER();
-    lx_ai_unload();
-    s_loaded = false;
+    lx_ai_unload();                       /* this slot only; teardown unloads the rest */
     SVC_LEAVE();
 }
 
@@ -79,9 +78,18 @@ static int ai_read(int idx, float *dst, int max)
     return n;
 }
 
+static int ai_select(int slot)
+{
+    SVC_ENTER();
+    int r = lx_ai_select(slot);
+    if (r >= 0) s_loaded = true;          /* a slot may hold a model: unload all at teardown */
+    SVC_LEAVE();
+    return r < 0 ? PAPP_E_UNSUPPORTED : r;
+}
+
 void lx_svc_ai_end_run(void)
 {
-    if (s_loaded) lx_ai_unload();
+    if (s_loaded) lx_ai_unload_all();
     s_loaded = false;
 }
 
@@ -94,4 +102,5 @@ const papp_if_ai_t lx_if_ai = {
     .output = ai_output,
     .run = ai_run,
     .read = ai_read,
+    .select = ai_select,
 };
