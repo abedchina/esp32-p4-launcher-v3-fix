@@ -91,6 +91,7 @@ def main():
         img.save(args[0]); print("shot", W, H, rot)
     elif cmd == "rm": d.req(T["RM"], args[0].encode()); print("removed")
     elif cmd == "crash": print(d.req(0x41).decode("utf-8", "replace"))
+    elif cmd == "crashclear": print(d.req(0x42).decode("utf-8", "replace"))
     elif cmd == "runlog":                      # runlog <secs> <papp> [args...]: run, then print the log frames
         secs = float(args[0])
         print(d.req(0x30, b"".join(a.encode() + bytes([0]) for a in args[1:]), timeout=15).decode("utf-8", "replace"))

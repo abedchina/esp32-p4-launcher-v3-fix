@@ -114,9 +114,18 @@ static void driver_cb(const uvc_host_driver_event_data_t *e, void *ctx)
 }
 
 /* ── stream ─────────────────────────────────────────────────────────────── */
+static int64_t s_open_us;                   /* when the running stream was started */
+
 static void close_stream(void)
 {
     xSemaphoreTake(s_oc_lock, portMAX_DELAY);
+    /* A stream closed right after it started can still have its start-up control transfers in
+     * flight: usbh_dev_close() then asserts (num_ctrl_xfers_inflight == 0) and the board resets.
+     * Give a young stream 1.5 s to settle first (apps opening and closing fast: Thonny resets). */
+    if (s_stream) {
+        int64_t age = esp_timer_get_time() - s_open_us;
+        if (age >= 0 && age < 1500000) vTaskDelay(pdMS_TO_TICKS((1500000 - age) / 1000 + 1));
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     uvc_host_stream_hdl_t h = s_stream;
     s_stream = NULL;
@@ -160,6 +169,8 @@ static esp_err_t open_stream(int w, int h, int fps, int owner)
         return ESP_OK;
     }
     if (s_stream) {
+        int64_t age = esp_timer_get_time() - s_open_us;     /* same settle time as close_stream() */
+        if (age >= 0 && age < 1500000) vTaskDelay(pdMS_TO_TICKS((1500000 - age) / 1000 + 1));
         uvc_host_stream_hdl_t old = s_stream;
         xSemaphoreTake(s_lock, portMAX_DELAY);
         s_stream = NULL;
@@ -189,6 +200,7 @@ static esp_err_t open_stream(int w, int h, int fps, int owner)
         s_h = s_list[best].v_res;
         s_fmt = 1;
         s_owner = owner;
+        s_open_us = esp_timer_get_time();
         ESP_LOGI(TAG, "streaming MJPEG %ux%u", s_w, s_h);
     } else {
         ESP_LOGE(TAG, "stream %ux%u failed: %s", s_list[best].h_res, s_list[best].v_res, esp_err_to_name(err));

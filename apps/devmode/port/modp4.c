@@ -39,7 +39,11 @@ static struct {
 
 static const papp_if_ai_t *ai;
 static const papp_if_cam_t *cam;
-static volatile bool s_loaded, s_cam_open, s_run;
+/* The camera is touched by ONE thread only: the screen thread (dm_ai_draw) opens it and
+ * reads frames; dm_ai_stop() first takes the screen thread out (s_loaded = false, wait
+ * while s_in_draw), then closes it. Two threads opening / closing the UVC stream at the
+ * same time crashed the launcher's camera task. */
+static volatile bool s_loaded, s_cam_open, s_run, s_in_draw;
 static papp_thread_t *s_thread;
 static uint16_t *s_frame;                       /* CW x CH copy the AI works on */
 static volatile int s_state;                    /* 0 wants a frame, 1 ready, 2 busy */
@@ -241,13 +245,15 @@ static void read_desc(const char *txt)
 
 void dm_ai_stop(void)
 {
+    __atomic_store_n(&s_loaded, false, __ATOMIC_SEQ_CST);     /* the screen thread stops drawing */
+    for (int i = 0; i < 200 && __atomic_load_n(&s_in_draw, __ATOMIC_SEQ_CST); i++) papp_delay_ms(5);
     s_run = false;
     if (s_thread) papp_thread_join(s_thread, 5000, NULL);
     s_thread = NULL;
-    s_loaded = false;
     if (ai) ai->unload();
-    if (cam && s_cam_open) cam->close();
-    s_cam_open = false;
+    /* the camera stream stays open for the whole Developer Mode session (the launcher closes it
+     * when the app exits): Thonny soft-resets on every connect / Run / Stop, and closing a UVC
+     * stream right after it started trips an assert in the USB host stack */
     for (int o = 0; o < MAXO; o++) { papp_free(s_obuf[o]); s_obuf[o] = NULL; }
     papp_free(s_out0); s_out0 = NULL;
     papp_free(s_frame); s_frame = NULL;
@@ -292,7 +298,7 @@ static mp_obj_t ai_load(size_t n_args, const mp_obj_t *args)
     s_out0 = papp_alloc(sizeof(float) * s_out0_n, PAPP_MEM_ANY, 0);
     s_frame = papp_alloc(CW * CH * 2, PAPP_MEM_LARGE, 64);
     if (!s_frame || !s_out0) { dm_ai_stop(); mp_raise_OSError(MP_ENOMEM); }
-    s_cam_open = cam->open(CW, CH, 0) >= 0;           /* may fail now: the screen thread retries */
+    s_cam_open = false;                               /* the screen thread opens the camera */
     s_state = 0;
     s_run = true;
     papp_thread_cfg_t tc = { .name = "ai", .stack_size = 16384, .prio = PAPP_PRIO_LOW, .core = 1 };
@@ -410,16 +416,37 @@ MP_REGISTER_MODULE(MP_QSTR_p4, dm_module_p4);
 static const uint16_t COLS[] = { 0x07E0, 0xF81F, 0xFFE0, 0x07FF, 0xFD20, 0x801F, 0xF800, 0x041F };
 
 /* -> 1 drew a new frame, 0 nothing new (don't present), -1 no camera (draw a message) */
+static int64_t s_t_open;
+
+static int ai_draw(uint16_t *px, int stride, void (*rect)(int, int, int, int, uint16_t),
+                   void (*text)(int, int, const char *, uint16_t, int));
+
 int dm_ai_draw(uint16_t *px, int stride, void (*rect)(int, int, int, int, uint16_t),
                void (*text)(int, int, const char *, uint16_t, int))
+{
+    __atomic_store_n(&s_in_draw, true, __ATOMIC_SEQ_CST);
+    int r = 0;
+    if (__atomic_load_n(&s_loaded, __ATOMIC_SEQ_CST)) r = ai_draw(px, stride, rect, text);
+    __atomic_store_n(&s_in_draw, false, __ATOMIC_SEQ_CST);
+    return r;
+}
+
+static int ai_draw(uint16_t *px, int stride, void (*rect)(int, int, int, int, uint16_t),
+                   void (*text)(int, int, const char *, uint16_t, int))
 {
     if (!cam) return -1;
     papp_cam_info_t ci;
     cam->info(&ci);
     if (!ci.connected) { s_cam_open = false; return -1; }
-    if (!s_cam_open) s_cam_open = cam->open(CW, CH, 0) >= 0;
-    if (!s_cam_open) return -1;
+    if (!s_cam_open) {                                    /* (re)open, at most once a second */
+        int64_t now = papp_time_us();
+        if (now - s_t_open < 1000000) return -1;
+        s_t_open = now;
+        s_cam_open = cam->open(CW, CH, 0) >= 0;
+        if (!s_cam_open) return -1;
+    }
     int r = cam->frame(px, CW, CH, stride, &s_seq, 100);
+    if (r < 0) { cam->close(); s_cam_open = false; return -1; }
     if (r != 1) return 0;
     if (s_state == 0 && s_frame) {                        /* hand the AI a copy of this frame */
         for (int y = 0; y < CH; y++) memcpy(&s_frame[y * CW], &px[y * stride], CW * 2);
