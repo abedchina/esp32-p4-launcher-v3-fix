@@ -74,6 +74,21 @@ static uint32_t s_seq;
 
 bool dm_ai_active(void) { return s_loaded; }
 
+/* ══ hands (task=hands): MediaPipe palm detector (slot 0, <name>.espdl) + hand landmarks
+ * (slot 1, <name>.lm), 21 points per hand, fingers up per hand - the same pipeline as the
+ * AI Models app (pose.c): detect -> rotated square crop -> landmarks -> track from points. ══ */
+#define TASK_HANDS 2
+#define MAXH 2
+#define PI_F 3.14159265f
+typedef struct { float cx, cy, size, rot; } roi_t;
+typedef struct { int n; float pt[MAXH][21][2]; int up[MAXH]; } hands_res_t;
+static hands_res_t s_hres[2];
+static volatile int s_hres_i;
+static roi_t s_roi[MAXH];
+static int s_nroi, s_det_skip, s_det_S, s_lm_S, s_lm_out, s_lm_flag;
+static uint16_t s_crop[256 * 256];
+static float s_lmbuf[63 + 16];
+
 /* ── decode (same as the AI Models app) ─────────────────────────────────── */
 static float sigm(float v) { return 1.0f / (1.0f + expf(-v)); }
 
@@ -198,15 +213,192 @@ static int decode(det_t *out)
     return k;
 }
 
+static float wrap_pi(float a)
+{
+    while (a > PI_F) a -= 2 * PI_F;
+    while (a < -PI_F) a += 2 * PI_F;
+    return a;
+}
+
+static roi_t make_roi(float cx, float cy, float w, float h, float rot, float scale, float shift_y)
+{
+    roi_t r = { cx - h * shift_y * sinf(rot), cy + h * shift_y * cosf(rot), fmaxf(w, h) * scale, rot };
+    return r;
+}
+
+static int hands_detect(roi_t *out, int maxn)
+{
+    const int R = 18;                                       /* box 4 + 7 keypoints x 2 */
+    typedef struct { float score, cx, cy, w, h, ax, ay, bx, by; } cand_t;
+    cand_t c[16];
+    int nc = 0;
+    float lmin = logf(M.conf / (1.0f - M.conf));
+    for (int o = 0; o < s_nout; o++) {
+        papp_ai_shape_t *s = &s_oshape[o];
+        if (s->ndim != 4 || s->dims[3] > 8) continue;
+        int G = s->dims[1], A = s->dims[3], b = -1;
+        for (int q = 0; q < s_nout; q++)
+            if (s_oshape[q].ndim == 4 && s_oshape[q].dims[1] == G && s_oshape[q].dims[3] == A * R) b = q;
+        if (b < 0) continue;
+        ai->read(o, s_obuf[o], s_osz[o]);
+        bool rd = false;
+        for (int i = 0; i < G * G * A; i++) {
+            if (s_obuf[o][i] < lmin) continue;
+            if (!rd) { ai->read(b, s_obuf[b], s_osz[b]); rd = true; }
+            int cell = i / A;
+            float ax = (cell % G + 0.5f) / G * s_det_S, ay = (cell / G + 0.5f) / G * s_det_S;
+            const float *g = &s_obuf[b][i * R];
+            cand_t d = { sigm(s_obuf[o][i]), ax + g[0], ay + g[1], g[2], g[3], ax + g[4], ay + g[5], ax + g[8], ay + g[9] };
+            if (nc < 16) c[nc++] = d;
+            else {
+                int lo = 0;
+                for (int k = 1; k < 16; k++) if (c[k].score < c[lo].score) lo = k;
+                if (d.score > c[lo].score) c[lo] = d;
+            }
+        }
+    }
+    for (int a = 0; a < nc; a++)
+        for (int b = a + 1; b < nc; b++)
+            if (c[b].score > c[a].score) { cand_t t = c[a]; c[a] = c[b]; c[b] = t; }
+    float r = fminf((float)s_det_S / CW, (float)s_det_S / CH);
+    int ox = (s_det_S - (int)lroundf(CW * r)) / 2, oy = (s_det_S - (int)lroundf(CH * r)) / 2;
+    int n = 0;
+    for (int a = 0; a < nc && n < maxn; a++) {
+        bool keep = true;
+        for (int k = 0; k < a && keep; k++) {
+            float dx = c[a].cx - c[k].cx, dy = c[a].cy - c[k].cy;
+            if (dx * dx + dy * dy < 0.25f * c[k].w * c[k].w) keep = false;
+        }
+        if (!keep) continue;
+        float cx = (c[a].cx - ox) / r, cy = (c[a].cy - oy) / r, w = c[a].w / r, h = c[a].h / r;
+        float vx = c[a].bx - c[a].ax, vy = c[a].by - c[a].ay;
+        out[n++] = make_roi(cx, cy, w, h, wrap_pi(PI_F / 2 - atan2f(-vy, vx)), 2.6f, -0.5f);
+    }
+    return n;
+}
+
+static bool hands_landmarks(const roi_t *ro, float (*pt)[2])
+{
+    const int S = s_lm_S;
+    float c = cosf(ro->rot), s = sinf(ro->rot), step = ro->size / S;
+    for (int v = 0; v < S; v++) {
+        float ly = (v + 0.5f) * step - ro->size / 2;
+        float bx = ro->cx - ly * s, by = ro->cy + ly * c, lx = 0.5f * step - ro->size / 2;
+        float fx = bx + lx * c, fy = by + lx * s, dx = step * c, dy = step * s;
+        uint16_t *d = &s_crop[v * S];
+        for (int u = 0; u < S; u++, fx += dx, fy += dy) {
+            int X = (int)fx, Y = (int)fy;
+            d[u] = (X >= 0 && X < CW && Y >= 0 && Y < CH) ? s_frame[Y * CW + X] : 0;
+        }
+    }
+    ai->select(1);
+    bool ok = false;
+    if (ai->run(s_crop, S, S, S, 1.0f / 255.0f, 0.0f, 0) >= 0) {
+        float f = 1;
+        if (s_lm_flag >= 0) ai->read(s_lm_flag, &f, 1);
+        if (s_lm_flag < 0 || f >= 0.5f) {
+            int n = ai->read(s_lm_out, s_lmbuf, (int)(sizeof s_lmbuf / sizeof s_lmbuf[0]));
+            if (n >= 63) {
+                for (int i = 0; i < 21; i++) {
+                    float lx = (s_lmbuf[i * 3] / S - 0.5f) * ro->size, ly = (s_lmbuf[i * 3 + 1] / S - 0.5f) * ro->size;
+                    pt[i][0] = ro->cx + lx * c - ly * s;
+                    pt[i][1] = ro->cy + lx * s + ly * c;
+                }
+                ok = true;
+            }
+        }
+    }
+    ai->select(0);
+    return ok;
+}
+
+static bool roi_from_points(float (*pt)[2], roi_t *out)
+{
+    static const int IDX[] = { 0, 1, 2, 3, 5, 6, 9, 10, 13, 14, 17, 18 };
+    float rot = wrap_pi(PI_F / 2 - atan2f(-(pt[9][1] - pt[0][1]), pt[9][0] - pt[0][0]));
+    float mnx = 1e9f, mny = 1e9f, mxx = -1e9f, mxy = -1e9f;
+    for (int i = 0; i < 12; i++) {
+        const float *p = pt[IDX[i]];
+        mnx = fminf(mnx, p[0]); mxx = fmaxf(mxx, p[0]); mny = fminf(mny, p[1]); mxy = fmaxf(mxy, p[1]);
+    }
+    float cx0 = (mnx + mxx) / 2, cy0 = (mny + mxy) / 2, c = cosf(rot), s = sinf(rot);
+    float a0 = 1e9f, b0 = 1e9f, a1 = -1e9f, b1 = -1e9f;
+    for (int i = 0; i < 12; i++) {
+        const float *p = pt[IDX[i]];
+        float dx = p[0] - cx0, dy = p[1] - cy0, a = dx * c + dy * s, b = -dx * s + dy * c;
+        a0 = fminf(a0, a); a1 = fmaxf(a1, a); b0 = fminf(b0, b); b1 = fmaxf(b1, b);
+    }
+    float ma = (a0 + a1) / 2, mb = (b0 + b1) / 2;
+    *out = make_roi(cx0 + ma * c - mb * s, cy0 + ma * s + mb * c, a1 - a0, b1 - b0, rot, 2.0f, -0.1f);
+    return out->size > 24 && out->size < 4 * CW;
+}
+
+static float pdist(const float *a, const float *b) { return hypotf(a[0] - b[0], a[1] - b[1]); }
+
+static int fingers_up(float (*p)[2])                        /* thumb + 4 fingers, like AI Models */
+{
+    static const int TIPS[] = { 8, 12, 16, 20 }, PIPS[] = { 6, 10, 14, 18 };
+    int n = 0;
+    for (int i = 0; i < 4; i++) n += pdist(p[TIPS[i]], p[0]) > pdist(p[PIPS[i]], p[0]) * 1.1f;
+    n += pdist(p[4], p[17]) > pdist(p[3], p[17]) && pdist(p[4], p[5]) > pdist(p[0], p[9]) * 0.45f;
+    return n;
+}
+
+/* one hands step -> also fills det boxes (label 0 = "hand") so seen / zone / count work too */
+static int hands_step(det_t *out)
+{
+    if (s_nroi == 0 || (s_nroi < MAXH && ++s_det_skip >= 6)) {
+        s_det_skip = 0;
+        if (ai->run(s_frame, CW, CH, CW, M.scale, M.offset, 1) >= 0) {
+            roi_t found[MAXH];
+            int nf = hands_detect(found, MAXH);
+            for (int i = 0; i < nf && s_nroi < MAXH; i++) {
+                bool dup = false;
+                for (int k = 0; k < s_nroi; k++)
+                    if (hypotf(found[i].cx - s_roi[k].cx, found[i].cy - s_roi[k].cy) < s_roi[k].size * 0.4f) dup = true;
+                if (!dup) s_roi[s_nroi++] = found[i];
+            }
+        }
+    }
+    int nxt = s_hres_i ^ 1, k = 0;
+    hands_res_t *hr = &s_hres[nxt];
+    roi_t keep[MAXH];
+    for (int i = 0; i < s_nroi; i++) {
+        if (!hands_landmarks(&s_roi[i], hr->pt[k])) continue;
+        hr->up[k] = fingers_up(hr->pt[k]);
+        if (roi_from_points(hr->pt[k], &keep[k])) k++;
+    }
+    for (int i = 0; i < k; i++) s_roi[i] = keep[i];
+    s_nroi = k;
+    hr->n = k;
+    s_hres_i = nxt;
+    for (int h = 0; h < k; h++) {                           /* a box around each hand */
+        float mnx = 1e9f, mny = 1e9f, mxx = -1e9f, mxy = -1e9f;
+        for (int i = 0; i < 21; i++) {
+            mnx = fminf(mnx, hr->pt[h][i][0]); mxx = fmaxf(mxx, hr->pt[h][i][0]);
+            mny = fminf(mny, hr->pt[h][i][1]); mxy = fmaxf(mxy, hr->pt[h][i][1]);
+        }
+        out[h] = (det_t){ (mnx + mxx) / 2, (mny + mxy) / 2, mxx - mnx, mxy - mny, 1.0f, 0 };
+    }
+    return k;
+}
+
 static int ai_thread(void *arg)
 {
     (void)arg;
     while (s_run) {
         if (s_state != 1) { papp_delay_ms(3); continue; }
         s_state = 2;
-        int64_t us = ai->run(s_frame, CW, CH, CW, M.scale, M.offset, M.task == 0);
+        int64_t us;
         int nxt = s_res_i ^ 1;
-        s_res_n[nxt] = us >= 0 ? decode(s_res[nxt]) : 0;
+        if (M.task == TASK_HANDS) {
+            int64_t t0 = papp_time_us();
+            s_res_n[nxt] = hands_step(s_res[nxt]);
+            us = papp_time_us() - t0;
+        } else {
+            us = ai->run(s_frame, CW, CH, CW, M.scale, M.offset, M.task == 0);
+            s_res_n[nxt] = us >= 0 ? decode(s_res[nxt]) : 0;
+        }
         int64_t now = papp_time_us();
         int zx = s_zx, zy = s_zy, zw = s_zw, zh = s_zh;
         for (int l = 0; l < M.nlabels && l < MAXL; l++) {
@@ -255,7 +447,7 @@ static void read_desc(const char *txt)
         char *v = strchr(line, '=');
         if (!v) continue;
         *v++ = 0;
-        if (!strcmp(line, "task")) M.task = !strcmp(v, "cls") ? 1 : !strcmp(v, "yolo") ? 0 : 9;
+        if (!strcmp(line, "task")) M.task = !strcmp(v, "cls") ? 1 : !strcmp(v, "yolo") ? 0 : !strcmp(v, "hands") ? TASK_HANDS : 9;
         else if (!strcmp(line, "conf")) M.conf = strtof(v, NULL);
         else if (!strcmp(line, "scale")) M.scale = strtof(v, NULL);
         else if (!strcmp(line, "offset")) M.offset = strtof(v, NULL);
@@ -279,7 +471,10 @@ void dm_ai_stop(void)
     s_run = false;
     if (s_thread) papp_thread_join(s_thread, 5000, NULL);
     s_thread = NULL;
+    if (ai && ai->hdr.version >= 2) { ai->select(1); ai->unload(); ai->select(0); }   /* hands: landmarks */
     if (ai) ai->unload();
+    s_nroi = 0; s_det_skip = 0;
+    memset(s_hres, 0, sizeof s_hres);
     /* the camera stream stays open for the whole Developer Mode session (the launcher closes it
      * when the app exits): Thonny soft-resets on every connect / Run / Stop, and closing a UVC
      * stream right after it started trips an assert in the USB host stack */
@@ -402,14 +597,38 @@ static mp_obj_t ai_load(size_t n_args, const mp_obj_t *args)
     snprintf(path, sizeof path, "/sd/models/%s.espdl", base);
     snprintf(txt, sizeof txt, "/sd/models/%s.txt", base);
     read_desc(txt);
-    if (M.task > 1) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("hand / face models are not supported in Python yet"));
+    if (M.task > TASK_HANDS) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("face models are not supported in Python yet"));
     if (n_args > 1) M.conf = mp_obj_get_float(args[1]);
     snprintf(M.name, sizeof M.name, "%s", base);
-    if (ai->hdr.version >= 2) ai->select(0);
-    if (ai->load(path) < 0) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("the model could not be loaded"));
     papp_ai_shape_t is;
+    if (M.task == TASK_HANDS) {                               /* landmarks <name>.lm in slot 1 */
+        if (ai->hdr.version < 2) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("update the launcher (0.32 or newer)"));
+        char lm[128];
+        snprintf(lm, sizeof lm, "/sd/models/%s.lm", base);
+        ai->select(1);
+        if (ai->load(lm) < 0 || ai->input(&is) < 0) {
+            ai->select(0);
+            mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("the hand landmark model (.lm) could not be loaded"));
+        }
+        s_lm_S = is.dims[1];
+        s_lm_out = s_lm_flag = -1;
+        for (int o = 0; o < ai->outputs(); o++) {
+            papp_ai_shape_t sh;
+            ai->output(o, &sh);
+            int n = 1;
+            for (int i = 0; i < sh.ndim; i++) n *= sh.dims[i];
+            if (n >= 63) { if (s_lm_out < 0) s_lm_out = o; }
+            else if (s_lm_flag < 0) s_lm_flag = o;
+        }
+        ai->select(0);
+        if (s_lm_out < 0 || s_lm_S > 256) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("unexpected hand landmark model"));
+        if (M.nlabels == 0) { snprintf(M.labels[0], 24, "hand"); M.nlabels = 1; }
+        s_nroi = 0; s_det_skip = 0;
+    } else if (ai->hdr.version >= 2) ai->select(0);
+    if (ai->load(path) < 0) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("the model could not be loaded"));
     ai->input(&is);
     if (is.ndim == 4) { in_h = is.dims[1]; in_w = is.dims[2]; }
+    s_det_S = in_h;
     s_nout = ai->outputs();
     if (s_nout > MAXO) s_nout = MAXO;
     for (int o = 0; o < s_nout; o++) {
@@ -543,6 +762,26 @@ static mp_obj_t ai_zone(size_t n_args, const mp_obj_t *args)
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ai_zone_obj, 0, 4, ai_zone);
 
+/* hands models: fingers() -> raised fingers on all hands (0..10), None with no hand; hands() -> count */
+static mp_obj_t ai_fingers(void)
+{
+    need_model();
+    if (M.task != TASK_HANDS) mp_raise_msg(&mp_type_OSError, MP_ERROR_TEXT("fingers() needs a hands model: p4.ai.load(\"finger_counter\")"));
+    const hands_res_t *hr = &s_hres[s_hres_i];
+    if (!hr->n) return mp_const_none;
+    int t = 0;
+    for (int h = 0; h < hr->n; h++) t += hr->up[h];
+    return MP_OBJ_NEW_SMALL_INT(t);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(ai_fingers_obj, ai_fingers);
+
+static mp_obj_t ai_hands(void)
+{
+    need_model();
+    return MP_OBJ_NEW_SMALL_INT(M.task == TASK_HANDS ? s_hres[s_hres_i].n : 0);
+}
+static MP_DEFINE_CONST_FUN_OBJ_0(ai_hands_obj, ai_hands);
+
 static mp_obj_t ai_inside(mp_obj_t lab)
 {
     need_model();
@@ -582,6 +821,8 @@ static const mp_rom_map_elem_t ai_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_ms), MP_ROM_PTR(&ai_ms_obj) },
     { MP_ROM_QSTR(MP_QSTR_conf), MP_ROM_PTR(&ai_conf_obj) },
     { MP_ROM_QSTR(MP_QSTR_models), MP_ROM_PTR(&ai_models_obj) },
+    { MP_ROM_QSTR(MP_QSTR_fingers), MP_ROM_PTR(&ai_fingers_obj) },
+    { MP_ROM_QSTR(MP_QSTR_hands), MP_ROM_PTR(&ai_hands_obj) },
     { MP_ROM_QSTR(MP_QSTR_zone), MP_ROM_PTR(&ai_zone_obj) },
     { MP_ROM_QSTR(MP_QSTR_inside), MP_ROM_PTR(&ai_inside_obj) },
     { MP_ROM_QSTR(MP_QSTR_entered), MP_ROM_PTR(&ai_entered_obj) },
@@ -639,6 +880,33 @@ static int ai_draw(uint16_t *px, int stride, void (*rect)(int, int, int, int, ui
         s_state = 1;
     }
     int i0 = s_res_i, n = s_res_n[i0];
+    if (M.task == TASK_HANDS) {                               /* skeleton + fingers */
+        static const uint8_t BONES[][2] = { {0,1},{1,2},{2,3},{3,4},{0,5},{5,6},{6,7},{7,8},{5,9},{9,10},{10,11},{11,12},
+                                            {9,13},{13,14},{14,15},{15,16},{13,17},{17,18},{18,19},{19,20},{0,17} };
+        const hands_res_t *hr = &s_hres[s_hres_i];
+        int total = 0;
+        for (int h = 0; h < hr->n; h++) {
+            uint16_t c = h ? PAPP_RGB565(255, 120, 220) : PAPP_RGB565(90, 255, 160);
+            for (unsigned b = 0; b < sizeof BONES / 2; b++) {
+                const float *a = hr->pt[h][BONES[b][0]], *e = hr->pt[h][BONES[b][1]];
+                float dx = e[0] - a[0], dy = e[1] - a[1];
+                int steps = (int)(fmaxf(fabsf(dx), fabsf(dy)) / 2) + 1;
+                for (int i = 0; i <= steps; i++) {
+                    int x = (int)(a[0] + dx * i / steps), y = (int)(a[1] + dy * i / steps);
+                    if (x >= 1 && x < CW - 1 && y >= 1 && y < CH - 1) rect(x - 1, y - 1, 3, 3, c);
+                }
+            }
+            for (int i = 0; i < 21; i++) {
+                int x = (int)hr->pt[h][i][0], y = (int)hr->pt[h][i][1];
+                if (x >= 3 && x < CW - 3 && y >= 3 && y < CH - 3) rect(x - 3, y - 3, 7, 7, 0xFFFF);
+            }
+            total += hr->up[h];
+        }
+        char fb[32];
+        snprintf(fb, sizeof fb, hr->n ? "FINGERS: %d" : "SHOW YOUR HAND", total);
+        rect(0, 0, (int)strlen(fb) * 24 + 16, 40, 0x0000);
+        text(8, 6, fb, hr->n ? PAPP_RGB565(90, 255, 160) : PAPP_RGB565(200, 200, 200), 4);
+    }
     for (int i = 0; i < n && M.task == 0; i++) {
         det_t *d = &s_res[i0][i];
         uint16_t c = COLS[d->cls % 8];
