@@ -22,8 +22,10 @@ CFG = {   # detector input, range scale/offset, landmark input
 
 
 def to_onnx(tfl, out):
+    import tensorflow as tf                                   # the input's real name (input_1, input_12, ...)
+    name = tf.lite.Interpreter(model_content=open(tfl, 'rb').read()).get_input_details()[0]['name']
     subprocess.run([sys.executable, '-m', 'tf2onnx.convert', '--tflite', tfl, '--output', out, '--opset', '13',
-                    '--inputs-as-nchw', 'input_1,input'], check=True, capture_output=True)
+                    '--inputs-as-nchw', name], check=True, capture_output=True)
     m = onnx.load(out)
     for n in m.graph.node:                                    # ESP-DL asserts on a Pad without an explicit mode
         if n.op_type == 'Pad' and not any(a.name == 'mode' for a in n.attribute):
@@ -61,6 +63,39 @@ def keep_outputs(src, dst, names):
     utils.extract_model(src, dst, [m.graph.input[0].name], names)
 
 
+EYES = [[33, 160, 158, 133, 153, 144], [362, 385, 387, 263, 373, 380]]   # p1..p6 of each eye (EAR)
+
+
+def add_eye_outputs(path):
+    """face mesh: the 478 points come out of one linear Conv with a big range (int8 step ~2 px, an eye is ~10 px).
+    Add two Convs made of differences of its rows: EyeV = the 2 vertical eye vectors, EyeH = the eye width vector
+    (x, y per eye). Exactly the same numbers in float, but with their own small int8 range -> a precise EAR."""
+    m = onnx.load(path)
+    prod = {o: n for n in m.graph.node for o in n.output}
+    rs = [n for n in m.graph.node if n.op_type == 'Reshape' and n.output[0] == 'Identity'][0]
+    conv = prod[rs.input[0]]
+    init = {i.name: i for i in m.graph.initializer}
+    Wt = onnx.numpy_helper.to_array(init[conv.input[1]]); bt = onnx.numpy_helper.to_array(init[conv.input[2]])
+    rows = {'EyeV': [(e[a], e[b], c) for e in EYES for a, b in ((1, 5), (2, 4)) for c in (0, 1)],
+            'EyeH': [(e[0], e[3], c) for e in EYES for c in (0, 1)]}
+    for name, rr in rows.items():
+        w = np.stack([Wt[a * 3 + c] - Wt[b * 3 + c] for a, b, c in rr]).astype(np.float32)
+        b = np.array([bt[a * 3 + c] - bt[b * 3 + c] for a, b, c in rr], np.float32)
+        m.graph.initializer.extend([onnx.numpy_helper.from_array(w, name + '_W'), onnx.numpy_helper.from_array(b, name + '_B')])
+        n = onnx.helper.make_node('Conv', [conv.input[0], name + '_W', name + '_B'], [name], name=name + '_conv')
+        n.attribute.extend(conv.attribute)
+        m.graph.node.append(n)
+        m.graph.output.append(onnx.helper.make_tensor_value_info(name, onnx.TensorProto.FLOAT, [1, len(rr), 1, 1]))
+    onnx.save(m, path)
+
+
+def ear_of(eyev, eyeh):
+    v, h = np.asarray(eyev).ravel(), np.asarray(eyeh).ravel()
+    e = [(np.hypot(v[k * 4], v[k * 4 + 1]) + np.hypot(v[k * 4 + 2], v[k * 4 + 3])) / (2 * max(1e-6, np.hypot(h[k * 2], h[k * 2 + 1])))
+         for k in range(2)]
+    return float(np.mean(e))
+
+
 def letter(im, S):
     w, h = im.size; r = min(S / w, S / h)
     c = Image.new('RGB', (S, S), (114, 114, 114))
@@ -68,11 +103,12 @@ def letter(im, S):
     return np.asarray(c, np.float32)
 
 
-def quantize(onnx_path, out, samples, S, eq=True):
+def quantize(onnx_path, out, samples, S, eq=True, calib='kl'):
     import torch
     from esp_ppq.api import espdl_quantize_onnx
     from esp_ppq.api.setting import QuantizationSettingFactory
     st = QuantizationSettingFactory.espdl_setting()
+    st.quantize_activation_setting.calib_algorithm = calib       # kl clips rare large activations (a small object)
     if eq:                                                    # depthwise MobileNet-style nets lose a lot without it
         st.equalization = True
         st.equalization_setting.opt_level = 2
@@ -86,6 +122,21 @@ def quantize(onnx_path, out, samples, S, eq=True):
                             collate_fn=lambda b: b.to('cpu').reshape(1, 3, S, S), device='cpu', error_report=False, verbose=0,
                             setting=st)
     return TorchExecutor(graph=g, device='cpu')
+
+
+def best_quantize(onnx_path, out, samples, S, score, label='model'):
+    """quantize with both calibrations, keep the one whose int8 model scores best (score(ex) -> number).
+    kl suits most layers, minmax keeps rare large activations (a small or thin object, a face score)."""
+    res = {}
+    for calib in ('minmax', 'kl'):
+        ex = quantize(onnx_path, out, samples, S, calib=calib)
+        res[calib] = (score(ex), ex)
+        print(f'  {label} calibration {calib}: score {res[calib][0]:.3f}')
+    best = max(res, key=lambda k: res[k][0])
+    if best != 'kl':                                          # the file on disk is the last one (kl): redo the winner
+        res[best] = (res[best][0], quantize(onnx_path, out, samples, S, calib=best))
+    print(f'  {label}: using {best}')
+    return res[best][1]
 
 
 def compare(onnx_path, ex, samples, fn):
@@ -114,6 +165,8 @@ def main():
     m = onnx.load(lm)
     keep = [o.name for o in m.graph.output if [d.dim_value for d in o.type.tensor_type.shape.dim][-1] != 63 or o.name == 'Identity']
     lm_cut = os.path.join(work, 'lm.onnx'); keep_outputs(lm, lm_cut, keep)
+    if kind == 'face':
+        add_eye_outputs(lm_cut)                               # precise EAR outputs (EyeV, EyeH)
     print('landmark outputs', keep)
 
     random.seed(1)
@@ -159,18 +212,40 @@ def main():
     random.shuffle(lm_s)
     print('calibration: detector', len(det_s), 'landmarks', len(pos), '+', len(neg), 'without')
 
-    ex = quantize(det_cut, os.path.join(out, kind + '_det.espdl'), det_s, c['ds'])
     def top(o):                                               # best classifier score (any stride)
         return max(float(x.max()) for x in o if x.shape[1] in (2, 6))
-    pair = compare(det_cut, ex, det_s[-40:], lambda f, q: (top(f) > 0, top(q) > 0))
+    held = det_s[-40:]
+
+    def det_score(ex):                                        # share of pictures where both find the object
+        pr = compare(det_cut, ex, held, lambda f, q: (top(f) > 0, top(q) > 0))
+        return sum(p[0] and p[1] for p in pr) / max(1, sum(p[0] for p in pr))
+    ex = best_quantize(det_cut, os.path.join(out, kind + '_det.espdl'), det_s, c['ds'], det_score, 'detector')
+    pair = compare(det_cut, ex, held, lambda f, q: (top(f) > 0, top(q) > 0))
     print(f'detector: found float {sum(p[0] for p in pair)}, int8 {sum(p[1] for p in pair)}, both {sum(p[0] and p[1] for p in pair)} of {len(pair)}')
-    ex = quantize(lm_cut, os.path.join(out, kind + '_lm.espdl'), lm_s, c['ls'])
     names = [o.name for o in onnx.load(lm_cut).graph.output]
     pi = [i for i, n in enumerate(names) if n == 'Identity'][0]
-    err = compare(lm_cut, ex, lm_s[:30], lambda f, q: float(np.abs(f[pi].reshape(-1, 3)[:, :2] - q[pi].reshape(-1, 3)[:, :2]).mean()))
-    print(f'landmarks int8 vs float: mean point error {np.mean(err):.2f} px of {c["ls"]}')
     fi = [i for i, n in enumerate(names) if n == 'Identity_1'][0]
     sg = (lambda v: 1 / (1 + np.exp(-v))) if kind == 'face' else (lambda v: v)
+
+    vi = [i for i, n in enumerate(names) if n == 'EyeV']; hi = [i for i, n in enumerate(names) if n == 'EyeH']
+
+    def ear_err(ex):                                          # face: EAR from the eye outputs, int8 vs float
+        r = compare(lm_cut, ex, pos[-30:], lambda f, q: abs(ear_of(f[vi[0]], f[hi[0]]) - ear_of(q[vi[0]], q[hi[0]])))
+        return float(np.mean(r))
+
+    def lm_score(ex):                                         # presence kept on real crops, minus the point error
+        r = compare(lm_cut, ex, pos[-30:], lambda f, q: (float(sg(q[fi].ravel()[0])) > 0.5,
+                                                          float(np.abs(f[pi].reshape(-1, 3)[:, :2] - q[pi].reshape(-1, 3)[:, :2]).mean())))
+        sc = np.mean([a for a, _ in r]) - np.mean([e for _, e in r]) / c['ls'] * 10
+        return sc - ear_err(ex) * 20 if vi else sc
+    ex = best_quantize(lm_cut, os.path.join(out, kind + '_lm.espdl'), lm_s, c['ls'], lm_score, 'landmarks')
+    err = compare(lm_cut, ex, lm_s[:30], lambda f, q: float(np.abs(f[pi].reshape(-1, 3)[:, :2] - q[pi].reshape(-1, 3)[:, :2]).mean()))
+    print(f'landmarks int8 vs float: mean point error {np.mean(err):.2f} px of {c["ls"]}')
+    if vi:
+        old = compare(lm_cut, ex, pos[-30:], lambda f, q: abs(ear_of(f[vi[0]], f[hi[0]]) -
+                      float(np.mean([(np.linalg.norm(P[e[1]] - P[e[5]]) + np.linalg.norm(P[e[2]] - P[e[4]])) / (2 * np.linalg.norm(P[e[0]] - P[e[3]]))
+                                     for P in [q[pi].reshape(-1, 3)[:, :2]] for e in EYES]))))
+        print(f'EAR error int8 vs float: eye outputs {ear_err(ex):.3f}  (from the 478 points it would be {np.mean(old):.3f})')
     for nm, smp in (('with', pos[-30:]), ('without', neg[-30:])):
         pr = compare(lm_cut, ex, smp, lambda f, q: (float(sg(f[fi].ravel()[0])), float(sg(q[fi].ravel()[0]))))
         print(f'presence on crops {nm} a {kind}: float {np.mean([a for a, _ in pr]):.2f}  int8 {np.mean([b for _, b in pr]):.2f}'

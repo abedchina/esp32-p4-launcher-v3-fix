@@ -9,9 +9,13 @@ Pictures are optional (Enter = the general pictures in C:\\ecm\\ai\\calib_genera
 import io, json, os, re, subprocess, sys, zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT = r'C:\ecm\ai\out'
-GENERAL = r'C:\ecm\ai\calib_general'
+# installed copy (tool\ beside venv\ and calib_general\) or the development PC (C:\ecm\ai)
+BASE = os.path.dirname(HERE) if os.path.isdir(os.path.join(os.path.dirname(HERE), 'calib_general')) else r'C:\ecm\ai'
+OUT = os.path.join(BASE, 'out')
+GENERAL = os.path.join(BASE, 'calib_general')
 HAND_DS = r'C:\Users\abedm\OneDrive\Desktop\cnn-code-ai\תנועה ידים לרובוט\hand_robot_abed_mihilia.v2i.yolov8\train'
+if not os.path.isdir(HAND_DS):
+    HAND_DS = os.path.join(BASE, 'hand_dataset')          # a YOLO hand dataset (images/ + labels/) for hand_landmarker
 
 
 def clean(s):
@@ -59,6 +63,40 @@ def keras_range(model):
                 continue
             return 'raw' if '"class_name": "Rescaling"' in cfg else '255'
     return None
+
+
+IMG_EXT = ('.jpg', '.jpeg', '.png')
+
+
+def pictures_beside(model, name):
+    """pictures in the model's folder (sub folders too), else in dataset .zip files there (Roboflow export)"""
+    d = os.path.dirname(os.path.abspath(model))
+    n = 0
+    for root, _, files in os.walk(d):
+        n += sum(f.lower().endswith(IMG_EXT) for f in files)
+        if n >= 20:
+            return d
+    out = os.path.join(OUT, name + '_pics')
+    if os.path.isdir(out) and len(os.listdir(out)) >= 20:
+        return out
+    import random
+    random.seed(1)
+    k = 0
+    for f in sorted(os.listdir(d)):
+        if not f.lower().endswith('.zip'):
+            continue
+        try:
+            z = zipfile.ZipFile(os.path.join(d, f))
+        except Exception:
+            continue
+        imgs = [i for i in z.namelist() if i.lower().endswith(IMG_EXT)]
+        random.shuffle(imgs)
+        os.makedirs(out, exist_ok=True)
+        for i in imgs[:300]:
+            with open(os.path.join(out, '%05d%s' % (k, os.path.splitext(i)[1].lower())), 'wb') as w:
+                w.write(z.read(i))
+            k += 1
+    return out if k >= 20 else None
 
 
 def labels_beside(model):
@@ -114,18 +152,27 @@ def main():
         t = ask('\nClass names with commas (example: fire,smoke):\n> ')
         extra = ['--labels', t]
 
+    os.makedirs(OUT, exist_ok=True)
     pics = ask('\nFolder with pictures (dataset / test pictures) - drag it here.\n'
-               '  Enter = no pictures (general pictures, a bit less exact):\n> ')
+               '  Enter = find pictures next to the model by itself:\n> ')
     if pics and not os.path.isdir(pics):
         raise SystemExit('Folder not found: ' + pics)
-    os.makedirs(OUT, exist_ok=True)
+    if not pics and kind not in ('hand', 'face'):
+        pics = pictures_beside(model, name)
+        if pics:
+            print('Using the pictures found next to the model:', pics)
+        else:
+            print('No pictures next to the model - using the general pictures (a bit less exact)')
     py = sys.executable
     if kind == 'yolo':
-        cmd = [py, os.path.join(HERE, 'convert_yolo.py'), model, name] + ([pics] if pics else []) + [GENERAL, '--title', title] + extra
+        cmd = [py, os.path.join(HERE, 'convert_yolo.py'), model, name] + [pics or GENERAL, '--title', title] + extra
     elif kind == 'cls':
-        cmd = [py, os.path.join(HERE, 'convert_classifier.py'), model, name, ','.join(names)] + ([pics] if pics else []) + [GENERAL, '--title', title] + extra
+        cmd = [py, os.path.join(HERE, 'convert_classifier.py'), model, name, ','.join(names)] + [pics or GENERAL, '--title', title] + extra
     else:
-        src = pics or (HAND_DS if kind == 'hand' else GENERAL)
+        faces = os.path.join(BASE, 'calib_faces')               # face pictures shipped with the tool
+        if not os.path.isdir(faces):
+            faces = os.path.join(HAND_DS, 'images')
+        src = pics or (HAND_DS if kind == 'hand' else faces if os.path.isdir(faces) else GENERAL)
         cmd = [py, os.path.join(HERE, 'convert_mediapipe.py'), kind, model, src, OUT]
     print('\nConverting... (5-15 minutes, do not close this window)\n')
     if subprocess.run(cmd, cwd=OUT).returncode:

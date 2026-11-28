@@ -144,23 +144,31 @@ def main():
     imgs = imgs[:200]
     print('calibration images', len(imgs))
     import onnxruntime as ort, torch
-    from esp_ppq.api import espdl_quantize_onnx
-    from esp_ppq.executor import TorchExecutor
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from convert_mediapipe import best_quantize
     sess = ort.InferenceSession(head, providers=['CPUExecutionProvider'])
-    calib = [torch.from_numpy(letterbox(p, S)[0]) for p in imgs]
-    loader = torch.utils.data.DataLoader(calib, batch_size=1, shuffle=False)
-    graph = espdl_quantize_onnx(onnx_import_file=head, espdl_export_file=a.name + '.espdl', calib_dataloader=loader,
-                                calib_steps=min(128, len(calib)), input_shape=[1, 3, S, S], target='esp32p4', num_of_bits=8,
-                                collate_fn=lambda b: b.to('cpu').reshape(1, 3, S, S), device='cpu', error_report=False, verbose=0)
-    ex = TorchExecutor(graph=graph, device='cpu')
-    agree = n = 0
-    for p in imgs[:40]:
-        x = letterbox(p, S)
-        f = top(sess.run(None, {inp: x}), nc)
-        q = top([t.numpy() for t in ex.forward(inputs=torch.from_numpy(x))], nc)
-        if f[1] >= a.conf:
-            n += 1; agree += f[0] == q[0]
-    print(f'int8 vs float: same class on {agree}/{n} images with a detection')
+    samples = [letterbox(p, S)[0].transpose(1, 2, 0) for p in imgs]           # HWC 0..1
+    held = [letterbox(p, S) for p in imgs[-40:]]
+    ref = [top(sess.run(None, {inp: x}), nc) for x in held]
+
+    def check(ex):
+        found = kept = same = 0
+        ratios = []
+        for x, f in zip(held, ref):
+            q = top([t.numpy() for t in ex.forward(inputs=torch.from_numpy(x))], nc)
+            if f[1] >= a.conf:
+                found += 1; kept += q[1] >= a.conf; same += q[1] >= a.conf and f[0] == q[0]
+                ratios.append(q[1] / f[1])
+        return found, kept, same, ratios
+
+    # kl or minmax: kl can clip the rare large activations of the object -> the int8 model stops detecting
+    ex = best_quantize(head, a.name + '.espdl', samples, S,
+                       lambda e: (lambda r: (r[2] + 0.01 * sum(r[3])) / max(1, r[0]))(check(e)), 'model')
+    found, kept, same, ratios = check(ex)
+    print(f'int8 vs float: original detects on {found} pictures, int8 still detects on {kept} (same class {same}), '
+          f'score kept {100 * (np.mean(ratios) if ratios else 0):.0f}%')
+    if found and kept < 0.7 * found:
+        print('WARNING: the int8 model loses many detections - send Claude this window')
     with open(a.name + '.txt', 'w', encoding='utf-8', newline='\n') as t:
         t.write(f"name={a.title or a.name}\ntask=yolo\nlabels={','.join(labels)}\nconf={a.conf}\nscale=0.0039215686\noffset=0\n")
     print('done', a.name + '.espdl', os.path.getsize(a.name + '.espdl'))
