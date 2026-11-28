@@ -95,8 +95,9 @@ static void devmode_autostart(void)
     for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
         if (stat(paths[i], &st) != 0) continue;
         char err[160];
+        static const char *const args[] = { "thonny" };      /* the app: don't run main.py by itself */
         ESP_LOGI(TAG, "USB reset (Thonny?): starting %s", paths[i]);
-        if (lx_app_launch(paths[i], 0, NULL, err, sizeof(err)) != ESP_OK)
+        if (lx_app_launch(paths[i], 1, args, err, sizeof(err)) != ESP_OK)
             ESP_LOGW(TAG, "Developer Mode did not start: %s", err);
         return;
     }

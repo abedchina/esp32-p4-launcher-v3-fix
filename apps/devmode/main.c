@@ -155,6 +155,12 @@ static void button(const btn_t *b)
 static bool hit(const btn_t *b, int x, int y) { return x >= b->x && x < b->x + b->w && y >= b->y && y < b->y + b->h; }
 
 static volatile bool ui_run;
+/* Started by the launcher because Thonny connected (argv[1] = "thonny"): main.py does NOT
+ * run by itself during this session, so Thonny finds an idle board and lists the files at
+ * once. Opened from the home screen: boot.py + main.py run at every (soft) start, like a
+ * board on its own. The MAIN.PY button runs main.py once in both cases. */
+static bool thonny_session;
+static volatile bool run_main_next;
 
 /* camera view (a model is loaded from Python): picture left, buttons + console right */
 static const btn_t B_STOP2 = { 648, 60, 146, 44, "STOP", PAPP_RGB565(200, 30, 40) };
@@ -210,7 +216,8 @@ static int ui_thread(void *arg)
             } else if (hit(camv ? &B_STOP2 : &B_STOP, tp.x, tp.y)) {  /* Ctrl+C */
                 mp_sched_keyboard_interrupt();
                 dm_activity(DM_ACT_STOP);
-            } else if (hit(camv ? &B_RUN2 : &B_RUN, tp.x, tp.y)) {    /* stop + soft reset = run main.py */
+            } else if (hit(camv ? &B_RUN2 : &B_RUN, tp.x, tp.y)) {    /* stop + soft reset + run main.py */
+                run_main_next = true;                               /* also in a Thonny session */
                 mp_sched_keyboard_interrupt();
                 papp_delay_ms(50);
                 dm_feed("\x02\x04");                                /* friendly REPL, Ctrl+D */
@@ -274,7 +281,7 @@ void __assert_func(const char *file, int line, const char *func, const char *exp
 
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    thonny_session = argc > 1 && !strcmp(argv[1], "thonny");
     papp_surface_cfg_t cfg = { .width = W, .height = H, .format = PAPP_PIXFMT_RGB565,
                                .scale = PAPP_SCALE_FIT_ASPECT, .buffers = 2 };
     papp_surface_t *s = papp_disp_surface_create(&cfg);
@@ -300,7 +307,11 @@ int main(int argc, char **argv)
         readline_init0();
         dm_os_reset();
 
-        if (pyexec_mode_kind == PYEXEC_MODE_FRIENDLY_REPL) {        /* like a board: boot.py, then main.py */
+        bool run_main = run_main_next || (!thonny_session && pyexec_mode_kind == PYEXEC_MODE_FRIENDLY_REPL);
+        run_main_next = false;
+        if (thonny_session && !run_main && pyexec_mode_kind == PYEXEC_MODE_FRIENDLY_REPL)
+            mp_hal_stdout_tx_str("Thonny session: main.py does not start by itself (MAIN.PY button / Run)\r\n");
+        if (run_main) {                                             /* like a board: boot.py, then main.py */
             pyexec_file_if_exists("boot.py");
             if (!dm_quit) pyexec_file_if_exists("main.py");
         }
