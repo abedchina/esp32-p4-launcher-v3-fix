@@ -846,6 +846,70 @@ typedef struct {
     int     (*select)(int slot);
 } papp_if_ai_t;
 
+/* ── IO interface ───────────────────────────────────────────────────────── */
+/* The board's expansion header for apps (launcher 0.33+): digital in/out, ADC, PWM,
+ * pulse timing, I2C on the board's header bus, UART 1/2 and one SPI bus.
+ * Only header pins listed by pins() are accepted (the display, SD card, audio and the
+ * C6 link can never be touched), I2C addresses of the board's own chips are refused.
+ * Every pin, PWM channel, UART and SPI bus the app used is released at teardown
+ * (pins back to inputs without pulls, PWM off), also when the app crashes or is killed.
+ * Results: >= 0 success, PAPP_E_ARG bad pin / address / port, PAPP_E_LIMIT no free
+ * channel, PAPP_E_IO driver error, PAPP_E_UNSUPPORTED no header on this board. */
+
+#define PAPP_IF_IO        PAPP_FOURCC('I', 'O', ' ', ' ')
+#define PAPP_IF_IO_VER    1
+
+#define PAPP_IO_CAP_DIGITAL  (1u << 0)
+#define PAPP_IO_CAP_ADC      (1u << 1)
+#define PAPP_IO_CAP_PWM      (1u << 2)
+#define PAPP_IO_CAP_BOOT     (1u << 3)      /* strapping pin: nothing may hold it at power-up */
+
+enum {                                      /* mode() */
+    PAPP_IO_INPUT = 0,
+    PAPP_IO_OUTPUT = 1,
+    PAPP_IO_INPUT_PULLUP = 2,
+    PAPP_IO_INPUT_PULLDOWN = 3,
+    PAPP_IO_OUTPUT_OPEN_DRAIN = 4,
+};
+
+enum {                                      /* papp_io_pin_t.use */
+    PAPP_IO_USE_FREE = 0, PAPP_IO_USE_INPUT, PAPP_IO_USE_OUTPUT, PAPP_IO_USE_PWM,
+    PAPP_IO_USE_ADC, PAPP_IO_USE_UART, PAPP_IO_USE_SPI,
+};
+
+typedef struct {
+    uint8_t gpio;
+    uint8_t caps;                           /* PAPP_IO_CAP_*                               */
+    uint8_t use;                            /* PAPP_IO_USE_* (by this app)                 */
+    uint8_t level;                          /* last level read or written                  */
+} papp_io_pin_t;
+
+typedef struct {
+    papp_iface_hdr_t hdr;
+    int     (*pins)(papp_io_pin_t *out, int max);        /* header pins -> count (all of them) */
+    int     (*mode)(int gpio, int mode);                 /* PAPP_IO_*: claims and sets up the pin */
+    int     (*write)(int gpio, int level);               /* output pin                        */
+    int     (*read)(int gpio);                           /* 0 / 1 (input or output pin)       */
+    int     (*adc)(int gpio, int *mv);                   /* raw 0..4095, *mv in millivolts    */
+    int     (*pwm)(int gpio, uint32_t freq_hz, uint32_t duty);  /* duty 0..65535; freq 0 = off */
+    int     (*release)(int gpio);                        /* back to a plain input, no pulls   */
+    int32_t (*pulse_in)(int gpio, int level, uint32_t timeout_us);  /* us at level, 0 = timeout (max 1 s) */
+    void    (*delay_us)(uint32_t us);                    /* busy wait, max 10000              */
+    int     (*i2c_probe)(uint8_t addr);                  /* 0 = a device answered             */
+    int     (*i2c_write)(uint8_t addr, const void *buf, size_t len);
+    int     (*i2c_read)(uint8_t addr, void *buf, size_t len);
+    int     (*i2c_write_read)(uint8_t addr, const void *wbuf, size_t wlen, void *rbuf, size_t rlen);
+    int     (*uart_open)(int port, int tx, int rx, uint32_t baud);   /* port 1 or 2, pin -1 = unused */
+    int     (*uart_write)(int port, const void *buf, size_t len);
+    int     (*uart_read)(int port, void *buf, size_t len, uint32_t timeout_ms);  /* bytes, 0 timeout */
+    void    (*uart_close)(int port);
+    int     (*spi_open)(int sck, int mosi, int miso);    /* one bus; miso / mosi -1 = unused */
+    int     (*spi_device)(int cs, uint32_t hz, int mode);/* -> device 0..3 (cs -1 = none)     */
+    int     (*spi_transfer)(int dev, const void *tx, void *rx, size_t len);  /* full duplex, max 4096 */
+    void    (*spi_close)(void);
+    void    (*all_off)(void);                            /* emergency stop: release everything */
+} papp_if_io_t;
+
 /* ── Entry point ────────────────────────────────────────────────────────── */
 
 /* Provided by the SDK runtime (crt0), located at entry_off. */

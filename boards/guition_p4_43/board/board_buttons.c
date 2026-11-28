@@ -14,6 +14,8 @@
 
 #include "esp_log.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 #include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -43,6 +45,7 @@ static adc_oneshot_unit_handle_t s_adc;
 static adc_channel_t s_ch_lr, s_ch_ud, s_ch_ab, s_ch_paddle, s_ch_battery;
 static bool s_pad, s_paddle, s_battery;
 static uint32_t s_stuck;                /* BSP_BTN_* bits whose pin reads high at rest */
+static volatile bool s_hold;            /* an app drives the header pins: don't read them */
 
 static bool adc_channel(int gpio, adc_channel_t *ch)
 {
@@ -150,7 +153,7 @@ static uint32_t adc_pair(adc_channel_t ch, uint32_t high, uint32_t mid)
 
 uint32_t bsp_buttons_read(void)
 {
-    if (!s_pad) return 0;
+    if (!s_pad || s_hold) return 0;
     uint32_t b = adc_pair(s_ch_lr, BSP_BTN_LEFT, BSP_BTN_RIGHT) |
                  adc_pair(s_ch_ud, BSP_BTN_UP, BSP_BTN_DOWN) |
                  adc_pair(s_ch_ab, BSP_BTN_A, BSP_BTN_B);
@@ -170,9 +173,64 @@ int bsp_battery_mv(void)
 
 int bsp_analog_read(int ch)
 {
-    if (ch != BSP_ANALOG_PADDLE || !s_paddle) return -1;
+    if (ch != BSP_ANALOG_PADDLE || !s_paddle || s_hold) return -1;
     int raw = adc_read(s_ch_paddle);
     if (raw < PADDLE_RAW_MIN) raw = PADDLE_RAW_MIN;
     if (raw > PADDLE_RAW_MAX) raw = PADDLE_RAW_MAX;
     return (raw - PADDLE_RAW_MIN) * 65535 / (PADDLE_RAW_MAX - PADDLE_RAW_MIN);
+}
+
+/* ── Header pins for apps (IO service, see board_io.c) ─────────────────── */
+
+/* The gamepad and paddle read GPIO 28-34 and 49-52: while an app drives those pins the
+ * readings are meaningless (and could fake HOME / button presses), so they stop. On
+ * release the pad's input setup is put back. */
+void bsp_buttons_hold(bool hold)
+{
+    if (hold) {
+        s_hold = true;
+        vTaskDelay(pdMS_TO_TICKS(2));           /* let a read in progress finish */
+        return;
+    }
+    if (!s_hold) return;
+    if (s_pad) {
+        for (size_t i = 0; i < N_DIGITAL; i++) {
+            gpio_config_t cfg = {
+                .pin_bit_mask = 1ULL << s_digital[i].gpio,
+                .mode = GPIO_MODE_INPUT,
+                .pull_down_en = GPIO_PULLDOWN_ENABLE,
+            };
+            gpio_config(&cfg);
+        }
+        adc_channel(BOARD_PAD_JOY_LR, &s_ch_lr);
+        adc_channel(BOARD_PAD_JOY_UD, &s_ch_ud);
+        adc_channel(BOARD_PAD_AB, &s_ch_ab);
+    }
+    if (s_paddle) adc_channel(BOARD_PADDLE_ADC, &s_ch_paddle);
+    s_hold = false;
+}
+
+static adc_cali_handle_t s_cali;
+static __attribute__((unused)) bool s_cali_tried;
+
+int bsp_io_adc_read(int gpio, int *mv)
+{
+    if (mv) *mv = -1;
+    adc_channel_t ch;
+    if (!s_adc || gpio == BOARD_BATTERY_ADC || !adc_channel(gpio, &ch)) return -1;
+    int raw = adc_read(ch);
+    if (mv) {
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+        if (!s_cali_tried) {
+            s_cali_tried = true;
+            adc_cali_curve_fitting_config_t c = { .unit_id = ADC_UNIT_2, .atten = ADC_ATTEN_DB_12,
+                                                  .bitwidth = ADC_BITWIDTH_12 };
+            if (adc_cali_create_scheme_curve_fitting(&c, &s_cali) != ESP_OK) s_cali = NULL;
+        }
+#endif
+        int v = -1;
+        if (!s_cali || adc_cali_raw_to_voltage(s_cali, raw, &v) != ESP_OK) v = raw * 3300 / 4095;
+        *mv = v;
+    }
+    return raw;
 }

@@ -4,7 +4,7 @@
 set(SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/../../guition_p4_43/board")
 idf_component_register(
     SRCS "${SRC_DIR}/board.c" "${SRC_DIR}/board_display.c" "${SRC_DIR}/board_touch.c" "${SRC_DIR}/board_audio.c"
-         "${SRC_DIR}/board_buttons.c" "${SRC_DIR}/board_rtc.c" "${SRC_DIR}/esp_lcd_st7701.c" "${SRC_DIR}/esp_lcd_st7701_mipi.c"
+         "${SRC_DIR}/board_buttons.c" "${SRC_DIR}/board_io.c" "${SRC_DIR}/board_rtc.c" "${SRC_DIR}/esp_lcd_st7701.c" "${SRC_DIR}/esp_lcd_st7701_mipi.c"
     INCLUDE_DIRS "${SRC_DIR}"
     REQUIRES bsp fatfs vfs sdmmc esp_driver_sdmmc esp_driver_gpio esp_lcd esp_hw_support esp_mm esp_driver_i2c esp_driver_i2s esp_adc
     WHOLE_ARCHIVE       # implements the bsp.h contract: link every file, callers sit in any component

@@ -18,6 +18,7 @@ papp_import_t __papp_imports[] = {
     { PAPP_IF_BLE, 1, PAPP_IMPORT_OPTIONAL, 0 },             /* launcher 0.29+, boards with BLE */
     { PAPP_IF_CAM, 1, PAPP_IMPORT_OPTIONAL, 0 },             /* launcher 0.30+, USB camera */
     { PAPP_IF_AI, 1, PAPP_IMPORT_OPTIONAL, 0 },              /* launcher 0.31+, ESP-DL models */
+    { PAPP_IF_IO, 1, PAPP_IMPORT_OPTIONAL, 0 },              /* launcher 0.33+, pin header */
 };
 
 #define SYS ((const papp_if_sys_t *)__papp_imports[0].iface)
@@ -32,6 +33,7 @@ papp_import_t __papp_imports[] = {
 #define BLE  ((const papp_if_ble_t *)__papp_imports[9].iface)
 #define CAM  ((const papp_if_cam_t *)__papp_imports[10].iface)
 #define AI   ((const papp_if_ai_t *)__papp_imports[11].iface)
+#define IO   ((const papp_if_io_t *)__papp_imports[12].iface)
 
 const papp_if_sys_t *papp_if_sys(void) { return SYS; }
 const papp_if_mem_t *papp_if_mem(void) { return MEM; }
@@ -242,3 +244,16 @@ const papp_if_cam_t *papp_cam(void) { return CAM; }
 /* ── AI ─────────────────────────────────────────────────────────────────── */
 
 const papp_if_ai_t *papp_ai(void) { return AI; }
+
+/* ── IO ─────────────────────────────────────────────────────────────────── */
+
+const papp_if_io_t *papp_io(void) { return IO; }
+int     papp_pin_mode(int g, int m)             { return IO ? IO->mode(g, m) : PAPP_E_UNSUPPORTED; }
+int     papp_pin_write(int g, int v)            { return IO ? IO->write(g, v) : PAPP_E_UNSUPPORTED; }
+int     papp_pin_read(int g)                    { return IO ? IO->read(g) : PAPP_E_UNSUPPORTED; }
+int     papp_pin_adc(int g, int *mv)            { return IO ? IO->adc(g, mv) : PAPP_E_UNSUPPORTED; }
+int     papp_pin_pwm(int g, uint32_t f, uint32_t d) { return IO ? IO->pwm(g, f, d) : PAPP_E_UNSUPPORTED; }
+int     papp_pin_release(int g)                 { return IO ? IO->release(g) : PAPP_E_UNSUPPORTED; }
+int32_t papp_pin_pulse(int g, int l, uint32_t t) { return IO ? IO->pulse_in(g, l, t) : PAPP_E_UNSUPPORTED; }
+void    papp_delay_us(uint32_t us)              { if (IO) IO->delay_us(us); }
+void    papp_io_all_off(void)                   { if (IO) IO->all_off(); }

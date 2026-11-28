@@ -113,7 +113,7 @@ static void btn_back(void)
 
 /* ══ models ══════════════════════════════════════════════════════════════ */
 typedef struct {
-    char file[96], name[40], labels[MAXL][24];
+    char file[96], name[40], base[40], labels[MAXL][24];
     int nlabels, task;          /* 0 yolo, 1 cls, 2 hands, 3 face */
     float conf, scale, offset, closed, seconds;
 } model_t;
@@ -135,6 +135,7 @@ static bool load_desc(const char *path, model_t *m)
     size_t l = strlen(base);
     if (l < 7 || strcasecmp(base + l - 6, ".espdl")) return false;
     snprintf(m->name, sizeof m->name, "%.*s", (int)(l - 6), base);
+    snprintf(m->base, sizeof m->base, "%s", m->name);
     m->conf = 0.5f; m->scale = 1.0f / 255.0f; m->offset = 0; m->closed = 0.2f; m->seconds = 5;
     char txt[110];
     snprintf(txt, sizeof txt, "%.*s.txt", (int)(strlen(path) - 6), path);
@@ -170,6 +171,7 @@ static volatile int ai_state;                    /* 0 wants a frame, 1 frame rea
 static volatile bool ai_run_flag;
 static det_t res[2][MAXD];
 static volatile int res_n[2], res_i;
+static volatile uint32_t res_seq;                /* +1 per finished inference */
 static volatile int64_t ai_us;
 #define MAXO 8
 static float *outbuf, *obuf[MAXO];
@@ -320,6 +322,7 @@ static int ai_thread(void *arg)
         int nxt = res_i ^ 1;
         res_n[nxt] = us >= 0 ? decode(res[nxt]) : 0;
         res_i = nxt;
+        res_seq++;
         ai_us = us;
         ai_state = 0;
     }
@@ -337,6 +340,138 @@ static void label_of(const det_t *d, char *b, int n)
     char tmp[8];
     if (d->cls >= cur->nlabels) { snprintf(tmp, sizeof tmp, "%d", d->cls); l = tmp; }
     snprintf(b, n, "%s %d%%", l, (int)(d->score * 100 + 0.5f));
+}
+
+/* ══ AI -> pins: /sd/config/ai_io.txt (launcher 0.33+) ═══════════════════
+ * One rule per line:   <model> <label> <seconds> <gpio> <action>
+ *   eyes closed 4 28 buzzer     eyes model, "closed" seen for 4 s in a row -> 2 kHz on GPIO 28
+ *   car_bus car 0 29 on         a car -> GPIO 29 high while it is seen
+ * model = the model's file name without .espdl. A label counts when it is in the picture
+ * and no other label is seen more often. Actions: on (high while true), low (low while
+ * true, high otherwise: relay boards that switch on low), buzzer (2 kHz while true),
+ * pulse (high for 1 s each time it starts). */
+#define IO_RULES "/sd/config/ai_io.txt"
+#define MAXR 6
+enum { ACT_ON, ACT_LOW, ACT_BUZZER, ACT_PULSE };
+typedef struct {
+    int label, gpio, act;
+    float seconds;
+    bool active, firing;
+    int64_t t_start, t_pulse;
+} rule_t;
+static rule_t rules[MAXR];
+static int nrules;
+static uint32_t rules_seq;
+
+static const char RULES_EXAMPLE[] =
+    "# AI Models -> pins. One rule per line: model label seconds gpio action\n"
+    "# model = file name without .espdl (eyes, car_bus, pen ...), label = one of its labels\n"
+    "# actions: on  low  buzzer  pulse        free pins: 28-35, 49-52 (3.3 V only!)\n"
+    "# Eyes closed for 4 seconds -> buzzer (2 kHz) on GPIO 28:\n"
+    "eyes closed 4 28 buzzer\n"
+    "# car_bus car 0 29 on\n";
+
+static void rule_out(rule_t *r, bool on)
+{
+    switch (r->act) {
+    case ACT_ON:     papp_pin_write(r->gpio, on); break;
+    case ACT_LOW:    papp_pin_write(r->gpio, !on); break;
+    case ACT_BUZZER: papp_pin_pwm(r->gpio, on ? 2000 : 0, 32768); break;
+    case ACT_PULSE:  if (on) { papp_pin_write(r->gpio, 1); r->t_pulse = papp_time_us(); } break;
+    }
+}
+
+static void rules_load(const model_t *m)
+{
+    nrules = 0;
+    rules_seq = res_seq;
+    if (!papp_io()) return;
+    FILE *f = fopen(IO_RULES, "r");
+    if (!f) {                                    /* first time: write the example (with the eyes rule) */
+        papp_fs()->mkdir("/sd/config");
+        f = fopen(IO_RULES, "w");
+        if (f) { fputs(RULES_EXAMPLE, f); fclose(f); }
+        f = fopen(IO_RULES, "r");
+        if (!f) return;
+    }
+    char line[160];
+    while (fgets(line, sizeof line, f) && nrules < MAXR) {
+        trim(line);
+        if (!line[0] || line[0] == '#') continue;
+        char *tok[5]; int nt = 0;                /* no sscanf: newlib's scanf family faults in apps */
+        for (char *t = strtok(line, " \t"); t && nt < 5; t = strtok(NULL, " \t")) tok[nt++] = t;
+        if (nt != 5) continue;
+        const char *mname = tok[0], *lab = tok[1], *act = tok[4];
+        float sec = strtof(tok[2], NULL);
+        int gpio = (int)strtol(tok[3], NULL, 10);
+        if (strcasecmp(mname, m->base)) continue;
+        int li = -1;
+        for (int i = 0; i < m->nlabels; i++) if (!strcasecmp(lab, m->labels[i])) li = i;
+        if (li < 0) continue;
+        rule_t *r = &rules[nrules];
+        memset(r, 0, sizeof *r);
+        r->label = li; r->gpio = gpio; r->seconds = sec < 0 ? 0 : sec;
+        r->act = !strcasecmp(act, "low") ? ACT_LOW : !strcasecmp(act, "buzzer") ? ACT_BUZZER
+               : !strcasecmp(act, "pulse") ? ACT_PULSE : ACT_ON;
+        if (papp_pin_mode(gpio, PAPP_IO_OUTPUT) < 0) continue;    /* not a free header pin */
+        rule_out(r, false);
+        nrules++;
+    }
+    fclose(f);
+}
+
+/* after every new AI result */
+static void rules_step(const det_t *d, int k)
+{
+    if (!nrules) return;
+    int64_t now = papp_time_us();
+    for (int i = 0; i < nrules; i++) {
+        rule_t *r = &rules[i];
+        if (r->act == ACT_PULSE && r->t_pulse && now - r->t_pulse > 1000000) { papp_pin_write(r->gpio, 0); r->t_pulse = 0; }
+    }
+    if (res_seq == rules_seq) return;
+    rules_seq = res_seq;
+    int cnt[MAXL] = {0};
+    for (int i = 0; i < k; i++) if (d[i].cls >= 0 && d[i].cls < MAXL) cnt[d[i].cls]++;
+    for (int i = 0; i < nrules; i++) {
+        rule_t *r = &rules[i];
+        bool cond = cnt[r->label] > 0;
+        for (int c = 0; c < MAXL && cond; c++) if (c != r->label && cnt[c] > cnt[r->label]) cond = false;
+        if (cond) {
+            if (!r->active) { r->active = true; r->t_start = now; }
+            if (!r->firing && now - r->t_start >= (int64_t)(r->seconds * 1e6f)) {
+                r->firing = true;
+                rule_out(r, true);
+                papp_log("AI->IO %s for %.1f s -> GPIO %d\n", cur->labels[r->label], r->seconds, r->gpio);
+            }
+        } else {
+            r->active = false;
+            if (r->firing) { r->firing = false; if (r->act != ACT_PULSE) rule_out(r, false); }
+        }
+    }
+}
+
+static void rules_draw(void)
+{
+    char b[48];
+    int y = 46;
+    for (int i = 0; i < nrules; i++, y += 30) {
+        rule_t *r = &rules[i];
+        float el = r->active ? (float)(papp_time_us() - r->t_start) / 1e6f : 0;
+        if (el > r->seconds) el = r->seconds;
+        if (r->firing) snprintf(b, sizeof b, "ALERT  %s  -  GPIO%d ON", cur->labels[r->label], r->gpio);
+        else snprintf(b, sizeof b, "%s %d.%d/%d S  GPIO%d", cur->labels[r->label], (int)el, (int)(el * 10) % 10,
+                      (int)(r->seconds + 0.5f), r->gpio);
+        uint16_t bg = r->firing ? PAPP_RGB565(220, 20, 30) : PAPP_RGB565(0, 0, 0);
+        rect(60, y, tw(b, 2) + 20, 26, bg, r->firing ? 30 : 16);
+        text(70, y + 6, b, r->firing ? 0xFFFF : r->active ? PAPP_RGB565(255, 220, 80) : PAPP_RGB565(170, 190, 210), 2);
+    }
+}
+
+static void rules_off(void)
+{
+    nrules = 0;
+    papp_io_all_off();
 }
 
 static void draw_message(const char *a, const char *b)
@@ -627,6 +762,7 @@ int main(int argc, char **argv)
                 obuf[o] = malloc(sizeof(float) * osz[o]);
             }
             res_n[0] = res_n[1] = 0; ai_us = 0; ai_state = 0;
+            rules_load(cur);
             ai_run_flag = true;
             papp_thread_cfg_t tc = { .name = "ai", .stack_size = 16384, .prio = PAPP_PRIO_LOW, .core = 1 };   /* core 0 = screen loop */
             th = papp_thread_create(ai_thread, NULL, &tc);
@@ -640,6 +776,7 @@ int main(int argc, char **argv)
             if (th) papp_thread_join(th, 5000, NULL);
             th = NULL;
             ai_unload_all();
+            rules_off();
             cam->close(); cam_open = false;
             screen = LIST;
             continue;
@@ -685,6 +822,8 @@ int main(int argc, char **argv)
             rect(0, H - 64, W, 64, 0x0000, 16);
             if (k > 0) { label_of(&d[0], b, sizeof b); text_c(H - 52, b, COLS[d[0].cls % 8], 5); }
             else text_c(H - 44, "...", PAPP_RGB565(200, 200, 200), 4);
+            rules_step(d, k);
+            rules_draw();
         }
         if (++frames, papp_time_us() - t_fps > 1000000) { fps = frames; frames = 0; t_fps = papp_time_us(); }
         snprintf(b, sizeof b, "%s  AI %dMS  %dFPS", cur->name, (int)(ai_us / 1000), fps);

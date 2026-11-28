@@ -204,6 +204,22 @@ const papp_if_cam_t *papp_cam(void);
 /* The AI interface: one ESP-DL model from the card (papp_abi.h). NULL on a launcher before 0.31. */
 const papp_if_ai_t *papp_ai(void);
 
+/* The board's pin header (papp_abi.h PAPP_IF_IO). NULL on a launcher before 0.33.
+ * The helpers below return PAPP_E_UNSUPPORTED (< 0) there. Every pin the app used goes
+ * back to a plain input when it exits.
+ *   papp_pin_mode(28, PAPP_IO_OUTPUT);  papp_pin_write(28, 1);
+ *   int mv; papp_pin_adc(50, &mv);      papp_pin_pwm(29, 2000, 32768);   (2 kHz, 50 %) */
+const papp_if_io_t *papp_io(void);
+int     papp_pin_mode(int gpio, int mode);
+int     papp_pin_write(int gpio, int level);
+int     papp_pin_read(int gpio);
+int     papp_pin_adc(int gpio, int *mv);
+int     papp_pin_pwm(int gpio, uint32_t freq_hz, uint32_t duty);   /* duty 0..65535, freq 0 = off */
+int     papp_pin_release(int gpio);
+int32_t papp_pin_pulse(int gpio, int level, uint32_t timeout_us);
+void    papp_delay_us(uint32_t us);
+void    papp_io_all_off(void);
+
 #define PAPP_BLE_UUID16(v) { 2, { (uint8_t)((v) & 0xFF), (uint8_t)((v) >> 8) } }
 
 /* Advertising data: appends one AD structure to buf (31 bytes at most); false if it doesn't fit */

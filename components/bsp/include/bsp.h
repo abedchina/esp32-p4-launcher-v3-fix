@@ -129,6 +129,28 @@ esp_err_t bsp_rtc_set(int64_t utc);
  * cell fitted the value is meaningless: callers check it is in the range of a Li-ion. */
 int       bsp_battery_mv(void);
 
+/* ── Expansion header for apps (IO service) ────────────────────────────────
+ * The pins of the board's header that apps may drive: everything else (display,
+ * SD, audio, the C6 link, strapping-only pins) is never handed out. Boards
+ * without a header keep the weak defaults (no pins, no bus). */
+#define BSP_IO_DIGITAL  (1u << 0)
+#define BSP_IO_ADC      (1u << 1)     /* has an ADC channel                         */
+#define BSP_IO_PWM      (1u << 2)
+#define BSP_IO_BOOT     (1u << 3)     /* strapping pin: nothing may pull it at power-up */
+
+typedef struct {
+    uint8_t gpio;
+    uint8_t caps;                     /* BSP_IO_*                                    */
+} bsp_io_pin_t;
+
+int   bsp_io_pins(const bsp_io_pin_t **out);       /* -> number of header pins        */
+void *bsp_io_i2c_bus(void);                        /* i2c_master_bus_handle_t on the header, NULL if none */
+bool  bsp_io_i2c_reserved(uint8_t addr);           /* address used by the board itself (touch, codec) */
+/* Header pins shared with the gamepad add-on: hold = stop reading them (an app drives them). */
+void  bsp_buttons_hold(bool hold);
+/* One ADC reading of a header pin: raw 0..4095, *mv calibrated if not NULL; -1 = no ADC there. */
+int   bsp_io_adc_read(int gpio, int *mv);
+
 #ifdef __cplusplus
 }
 #endif

@@ -38,6 +38,8 @@ extern const papp_if_cam_t lx_if_cam;     /* USB camera (lx_cam) */
 void lx_svc_cam_end_run(void);
 extern const papp_if_ai_t lx_if_ai;       /* ESP-DL models (lx_ai) */
 void lx_svc_ai_end_run(void);
+extern const papp_if_io_t lx_if_io;       /* expansion header pins (bsp_io_*) */
+void lx_svc_io_end_run(void);
 
 /* NET bookkeeping (lx_svc_net.c) */
 void lx_svc_net_init(void);
