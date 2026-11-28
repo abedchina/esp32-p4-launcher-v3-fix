@@ -615,40 +615,138 @@ static void dispatch(uint8_t type, uint16_t seq, uint8_t *p, uint32_t len)
     }
 }
 
+/* ── TTY pass-through (PAPP_IF_TTY) ─────────────────────────────────────────
+ * While an app holds the port (a MicroPython REPL for Thonny, a serial monitor),
+ * every byte that is not part of a valid DevLink frame (start bytes, sane length,
+ * CRC) goes to the app's stream; the app's output is written raw. DevLink requests
+ * keep working in between, so tools can still stop the app or copy files. */
+
+#include "freertos/stream_buffer.h"
+
+#define TTY_RX_SIZE   (16 * 1024)
+#define TTY_FRAME_MS  300                /* gap that ends a frame candidate in TTY mode */
+
+static StreamBufferHandle_t s_tty_rx;
+static volatile bool s_tty_open;
+
+static void tty_push(const uint8_t *p, size_t n)
+{
+    if (s_tty_open && n) xStreamBufferSend(s_tty_rx, p, n, pdMS_TO_TICKS(200));
+}
+
+static int tty_open(void)
+{
+    if (s_tty_open) return PAPP_E_LIMIT;
+    if (!s_tty_rx) s_tty_rx = xStreamBufferCreate(TTY_RX_SIZE, 1);
+    if (!s_tty_rx) return PAPP_E_NOMEM;
+    xStreamBufferReset(s_tty_rx);
+    s_tty_open = true;
+    return 0;
+}
+
+static void tty_close(void)
+{
+    s_tty_open = false;
+}
+
+static int tty_read(void *buf, size_t max, uint32_t timeout_ms)
+{
+    if (!s_tty_open) return PAPP_E_ARG;
+    return (int)xStreamBufferReceive(s_tty_rx, buf, max, pdMS_TO_TICKS(timeout_ms));
+}
+
+static int tty_write(const void *buf, size_t len)
+{
+    if (!s_tty_open) return PAPP_E_ARG;
+    if (!usb_serial_jtag_is_connected()) return (int)len;        /* nobody listening: drop */
+    if (xSemaphoreTake(s_tx_lock, pdMS_TO_TICKS(500)) != pdTRUE) return 0;
+    bool ok = write_all(buf, len, pdMS_TO_TICKS(100));
+    xSemaphoreGive(s_tx_lock);
+    return ok ? (int)len : 0;
+}
+
+static int tty_connected(void)
+{
+    return usb_serial_jtag_is_connected() ? 1 : 0;
+}
+
+static const lx_tty_ops_t s_tty_ops = {
+    .open = tty_open, .close = tty_close, .read = tty_read, .write = tty_write, .connected = tty_connected,
+};
+
 /* ── RX task ────────────────────────────────────────────────────────────── */
 
-static bool read_exact(uint8_t *buf, size_t len, int timeout_ms)
+static uint8_t s_in[512];
+static int s_in_n, s_in_i;
+
+static bool rx_get(uint8_t *c, int timeout_ms)
 {
-    int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
-    while (len) {
-        int n = usb_serial_jtag_read_bytes(buf, len, pdMS_TO_TICKS(50));
-        if (n > 0) { buf += n; len -= n; }
-        else if (esp_timer_get_time() > deadline) return false;
+    if (s_in_i >= s_in_n) {
+        int n = usb_serial_jtag_read_bytes(s_in, sizeof(s_in),
+                                           timeout_ms < 0 ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms));
+        if (n <= 0) return false;
+        s_in_n = n;
+        s_in_i = 0;
     }
+    *c = s_in[s_in_i++];
     return true;
+}
+
+/* -> bytes read (len when complete) */
+static size_t read_n(uint8_t *buf, size_t len, int timeout_ms)
+{
+    size_t got = 0;
+    int64_t deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+    while (got < len) {
+        if (rx_get(buf + got, 50)) {
+            got++;
+            if (s_tty_open) deadline = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
+        } else if (esp_timer_get_time() > deadline) {
+            break;
+        }
+    }
+    return got;
 }
 
 static void devlink_task(void *arg)
 {
     uint8_t hdr[DL_HDR_SIZE];
+    uint8_t crcb[4];
     for (;;) {
-        /* Sync on the two start-of-frame bytes */
+        /* Sync on the two start-of-frame bytes; anything else is TTY data (or noise) */
         uint8_t c;
-        if (usb_serial_jtag_read_bytes(&c, 1, portMAX_DELAY) != 1 || c != DL_SOF0) continue;
-        if (!read_exact(&c, 1, RX_TIMEOUT_MS) || c != DL_SOF1) continue;
-        hdr[0] = DL_SOF0; hdr[1] = DL_SOF1;
-        if (!read_exact(hdr + 2, DL_HDR_SIZE - 2, RX_TIMEOUT_MS)) continue;
+        if (!rx_get(&c, -1)) continue;
+        if (c != DL_SOF0) { tty_push(&c, 1); continue; }
+        int to = s_tty_open ? TTY_FRAME_MS : RX_TIMEOUT_MS;
+        hdr[0] = c;
+        if (!rx_get(&hdr[1], to)) { tty_push(hdr, 1); continue; }
+        if (hdr[1] != DL_SOF1) {
+            tty_push(hdr, 1);
+            s_in_i--;                                  /* look at that byte again */
+            continue;
+        }
+        size_t n = read_n(hdr + 2, DL_HDR_SIZE - 2, to);
+        if (n < DL_HDR_SIZE - 2) { tty_push(hdr, 2 + n); continue; }
 
         uint8_t type = hdr[2];
         uint16_t seq = hdr[4] | (hdr[5] << 8);
         uint32_t len = hdr[6] | (hdr[7] << 8) | (hdr[8] << 16) | ((uint32_t)hdr[9] << 24);
-        if (len > DL_MAX_PAYLOAD) continue;
+        if (len > DL_MAX_PAYLOAD) { tty_push(hdr, DL_HDR_SIZE); continue; }
 
+        n = read_n(s_rx, len, to);
+        size_t nc = n == len ? read_n(crcb, 4, to) : 0;
         uint32_t crc;
-        if (!read_exact(s_rx, len, RX_TIMEOUT_MS) || !read_exact((uint8_t *)&crc, 4, RX_TIMEOUT_MS)) continue;
-        uint32_t calc = lx_crc32(lx_crc32(0, hdr + 2, DL_HDR_SIZE - 2), s_rx, len);
-        if (calc != crc) {
-            reply_err(type, seq, "frame CRC mismatch");
+        memcpy(&crc, crcb, 4);
+        bool good = n == len && nc == 4 &&
+                    lx_crc32(lx_crc32(0, hdr + 2, DL_HDR_SIZE - 2), s_rx, len) == crc;
+        if (!good) {
+            if (s_tty_open) {                          /* not ours after all: hand it to the app */
+                tty_push(hdr, DL_HDR_SIZE);
+                tty_push(s_rx, n);
+                tty_push(crcb, nc);
+            } else if (n == len && nc == 4) {
+                reply_err(type, seq, "frame CRC mismatch");
+            }
             continue;
         }
         s_last_host_us = esp_timer_get_time();
@@ -690,6 +788,7 @@ esp_err_t lx_devlink_start(void)
     if (!s_rx || !s_tx || !s_tx_lock) return ESP_ERR_NO_MEM;
 
     s_orig_vprintf = esp_log_set_vprintf(dl_vprintf);
+    lx_app_set_tty(&s_tty_ops);
     if (xTaskCreatePinnedToCore(devlink_task, "devlink", 8192, NULL, 4, NULL, 1) != pdPASS)
         return ESP_ERR_NO_MEM;
     ESP_LOGI(TAG, "DevLink ready on USB-Serial-JTAG");

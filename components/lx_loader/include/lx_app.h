@@ -64,6 +64,17 @@ esp_err_t lx_app_read_manifest(const char *path, papp_manifest_t *out);
 /* True if the previous reset was a crash while an app was running. */
 bool lx_app_last_crash(lx_app_crash_ctx_t *out);
 
+/* The USB serial port for apps (PAPP_IF_TTY): the component that owns the port
+ * (DevLink) hands its byte-stream functions over at start. */
+typedef struct {
+    int  (*open)(void);
+    void (*close)(void);
+    int  (*read)(void *buf, size_t max, uint32_t timeout_ms);
+    int  (*write)(const void *buf, size_t len);
+    int  (*connected)(void);
+} lx_tty_ops_t;
+void lx_app_set_tty(const lx_tty_ops_t *ops);
+
 #ifdef __cplusplus
 }
 #endif

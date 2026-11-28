@@ -40,6 +40,8 @@ extern const papp_if_ai_t lx_if_ai;       /* ESP-DL models (lx_ai) */
 void lx_svc_ai_end_run(void);
 extern const papp_if_io_t lx_if_io;       /* expansion header pins (bsp_io_*) */
 void lx_svc_io_end_run(void);
+extern const papp_if_tty_t lx_if_tty;     /* USB serial port pass-through (DevLink) */
+void lx_svc_tty_end_run(void);
 
 /* NET bookkeeping (lx_svc_net.c) */
 void lx_svc_net_init(void);

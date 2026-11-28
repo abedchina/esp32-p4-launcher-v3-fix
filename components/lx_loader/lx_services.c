@@ -13,6 +13,8 @@
 #include <time.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <unistd.h>
 
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
@@ -366,8 +368,119 @@ static int fs_mkdir(const char *path)
     return r;
 }
 
+/* v2: folders (tracked like files), stat, rename, rmdir, flush */
+#define MAX_DIRS 8
+static DIR *s_dirs[MAX_DIRS];
+static char s_dir_path[MAX_DIRS][160];
+
+static papp_dir_t *fs_dir_open(const char *path)
+{
+    SVC_ENTER();
+    DIR *d = NULL;
+    for (int i = 0; i < MAX_DIRS; i++) {
+        if (s_dirs[i]) continue;
+        d = opendir(path);
+        if (d) { s_dirs[i] = d; snprintf(s_dir_path[i], sizeof s_dir_path[i], "%.159s", path); }
+        break;
+    }
+    SVC_LEAVE();
+    return (papp_dir_t *)d;
+}
+
+static int fs_dir_read(papp_dir_t *dp, papp_dirent_t *out)
+{
+    if (!dp || !out) return -1;
+    SVC_ENTER();
+    int r = -1, slot = -1;
+    for (int i = 0; i < MAX_DIRS; i++) if (s_dirs[i] == (DIR *)dp) slot = i;
+    if (slot >= 0) {
+        struct dirent *e;
+        do e = readdir((DIR *)dp); while (e && (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")));
+        if (!e) r = 0;
+        else {
+            memset(out, 0, sizeof *out);
+            snprintf(out->name, sizeof out->name, "%.127s", e->d_name);
+            out->is_dir = e->d_type == DT_DIR;
+            if (!out->is_dir) {
+                char full[300];
+                snprintf(full, sizeof full, "%.159s/%.127s", s_dir_path[slot], e->d_name);
+                struct stat st;
+                if (stat(full, &st) == 0) out->size = (uint32_t)st.st_size;
+            }
+            r = 1;
+        }
+    }
+    SVC_LEAVE();
+    return r;
+}
+
+static void fs_dir_close(papp_dir_t *dp)
+{
+    if (!dp) return;
+    SVC_ENTER();
+    for (int i = 0; i < MAX_DIRS; i++)
+        if (s_dirs[i] == (DIR *)dp) { closedir(s_dirs[i]); s_dirs[i] = NULL; }
+    SVC_LEAVE();
+}
+
+static int fs_stat(const char *path, papp_stat_t *out)
+{
+    SVC_ENTER();
+    struct stat st;
+    int r = -1;
+    size_t l = path ? strlen(path) : 0;
+    if (l && (stat(path, &st) == 0)) {
+        r = 0;
+    } else if (l && (!strcmp(path, "/sd") || !strcmp(path, "/sd/"))) {   /* mount point: FatFs can't stat it */
+        memset(&st, 0, sizeof st);
+        st.st_mode = S_IFDIR;
+        r = 0;
+    }
+    if (r == 0 && out) {
+        memset(out, 0, sizeof *out);
+        out->is_dir = S_ISDIR(st.st_mode);
+        out->size = out->is_dir ? 0 : (uint32_t)st.st_size;
+        out->mtime = (int64_t)st.st_mtime;
+    }
+    SVC_LEAVE();
+    return r;
+}
+
+static int fs_rename(const char *from, const char *to)
+{
+    SVC_ENTER();
+    int r = rename(from, to);
+    SVC_LEAVE();
+    return r;
+}
+
+static int fs_rmdir(const char *path)
+{
+    SVC_ENTER();
+    int r = rmdir(path);
+    SVC_LEAVE();
+    return r;
+}
+
+static int fs_flush(papp_file_t *f)
+{
+    if (!f) return -1;
+    SVC_ENTER();
+    int r = fflush((FILE *)f);
+    if (r == 0) fsync(fileno((FILE *)f));
+    SVC_LEAVE();
+    return r;
+}
+
 static const papp_if_fs_t s_if_fs = {
     .hdr = { PAPP_IF_FS, PAPP_IF_FS_VER, sizeof(papp_if_fs_t) },
+    .dir_open  = fs_dir_open,
+    .dir_read  = fs_dir_read,
+    .dir_close = fs_dir_close,
+    .stat      = fs_stat,
+    .rename    = fs_rename,
+    .rmdir     = fs_rmdir,
+    .flush     = fs_flush,
     .open   = fs_open,
     .close  = fs_close,
     .read   = fs_read,
@@ -397,6 +510,7 @@ static const papp_iface_hdr_t *const s_registry[] = {
     &lx_if_cam.hdr,
     &lx_if_ai.hdr,
     &lx_if_io.hdr,
+    &lx_if_tty.hdr,
 };
 
 void lx_svc_init(lx_app_log_sink_t log_sink)
@@ -449,6 +563,8 @@ void lx_svc_end_run(uint32_t *leaked_allocs, uint32_t *leaked_bytes, uint32_t *l
             nf++;
         }
     }
+    for (int i = 0; i < MAX_DIRS; i++)
+        if (s_dirs[i]) { closedir(s_dirs[i]); s_dirs[i] = NULL; }
     lx_comp_destroy_all();      /* surfaces, streams and sync objects go */
     lx_audio_close_all();       /* with the app; not counted as leaks    */
     lx_thrd_end_run();
@@ -457,6 +573,7 @@ void lx_svc_end_run(uint32_t *leaked_allocs, uint32_t *leaked_bytes, uint32_t *l
     lx_svc_cam_end_run();       /* the camera stream the app opened */
     lx_svc_ai_end_run();        /* the model the app loaded */
     lx_svc_io_end_run();        /* header pins back to inputs, PWM / UART / SPI off */
+    lx_svc_tty_end_run();       /* the USB serial port back to DevLink */
     lx_ui_reset();              /* a browser the app was killed in */
     *leaked_allocs = na; *leaked_bytes = nb; *leaked_files = nf;
 }

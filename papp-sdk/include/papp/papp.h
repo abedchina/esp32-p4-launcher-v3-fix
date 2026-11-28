@@ -210,6 +210,8 @@ const papp_if_ai_t *papp_ai(void);
  *   papp_pin_mode(28, PAPP_IO_OUTPUT);  papp_pin_write(28, 1);
  *   int mv; papp_pin_adc(50, &mv);      papp_pin_pwm(29, 2000, 32768);   (2 kHz, 50 %) */
 const papp_if_io_t *papp_io(void);
+/* The USB-C serial port as a byte stream (papp_abi.h PAPP_IF_TTY). NULL before 0.33. */
+const papp_if_tty_t *papp_tty(void);
 int     papp_pin_mode(int gpio, int mode);
 int     papp_pin_write(int gpio, int level);
 int     papp_pin_read(int gpio);

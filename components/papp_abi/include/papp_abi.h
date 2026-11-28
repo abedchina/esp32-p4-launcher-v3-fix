@@ -188,9 +188,24 @@ typedef struct {
 /* ── FS interface ───────────────────────────────────────────────────────── */
 
 #define PAPP_IF_FS        PAPP_FOURCC('F', 'S', ' ', ' ')
-#define PAPP_IF_FS_VER    1
+#define PAPP_IF_FS_VER    2                         /* v2 (0.33): folders, stat, rename */
 
 typedef struct papp_file papp_file_t;
+typedef struct papp_dir papp_dir_t;
+
+typedef struct {
+    char     name[128];
+    uint8_t  is_dir;
+    uint8_t  reserved[3];
+    uint32_t size;
+} papp_dirent_t;
+
+typedef struct {
+    uint8_t  is_dir;
+    uint8_t  reserved[3];
+    uint32_t size;
+    int64_t  mtime;                                 /* seconds since 1970, 0 if unknown */
+} papp_stat_t;
 
 typedef struct {
     papp_iface_hdr_t hdr;
@@ -203,6 +218,14 @@ typedef struct {
     long    (*size)(const char *path);            /* -1 if missing */
     int     (*remove)(const char *path);
     int     (*mkdir)(const char *path);
+    /* v2: check hdr.version >= 2. Folders opened by an app are closed at teardown. */
+    papp_dir_t *(*dir_open)(const char *path);
+    int     (*dir_read)(papp_dir_t *d, papp_dirent_t *out);   /* 1 entry, 0 end, < 0 error */
+    void    (*dir_close)(papp_dir_t *d);
+    int     (*stat)(const char *path, papp_stat_t *out);       /* 0 ok, -1 missing */
+    int     (*rename)(const char *from, const char *to);
+    int     (*rmdir)(const char *path);                        /* empty folder only */
+    int     (*flush)(papp_file_t *f);
 } papp_if_fs_t;
 
 /* ── DISP interface ─────────────────────────────────────────────────────── */
@@ -909,6 +932,24 @@ typedef struct {
     void    (*spi_close)(void);
     void    (*all_off)(void);                            /* emergency stop: release everything */
 } papp_if_io_t;
+
+/* ── TTY interface ──────────────────────────────────────────────────────── */
+/* The board's USB-C serial port (the COM port a PC sees) as a plain byte stream for an
+ * app (launcher 0.33+): a REPL for Thonny, a serial monitor, a protocol of its own.
+ * While an app holds it the launcher's DevLink frames still work (they are recognised
+ * by their start bytes and CRC); every other byte goes to the app. Released at teardown. */
+
+#define PAPP_IF_TTY       PAPP_FOURCC('T', 'T', 'Y', ' ')
+#define PAPP_IF_TTY_VER   1
+
+typedef struct {
+    papp_iface_hdr_t hdr;
+    int   (*open)(void);                                  /* 0 ok, PAPP_E_LIMIT taken     */
+    void  (*close)(void);
+    int   (*read)(void *buf, size_t max, uint32_t timeout_ms);  /* bytes, 0 timeout (max 1 s) */
+    int   (*write)(const void *buf, size_t len);          /* bytes (dropped when no PC)   */
+    int   (*connected)(void);                             /* 1 = a PC is on the USB port  */
+} papp_if_tty_t;
 
 /* ── Entry point ────────────────────────────────────────────────────────── */
 

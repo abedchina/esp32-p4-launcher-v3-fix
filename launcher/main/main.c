@@ -20,7 +20,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <sys/time.h>
+#include <sys/stat.h>
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -80,6 +82,26 @@ static void sd_retry_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* Thonny (and every serial tool that toggles DTR/RTS) resets the board through the
+ * USB-Serial-JTAG port when it connects. After such a reset the Developer Mode app
+ * (MicroPython REPL on the USB port) is started at once, so Thonny finds its >>>
+ * prompt without anyone touching the board. /sd/config/devmode_noauto turns it off. */
+static void devmode_autostart(void)
+{
+    if (esp_reset_reason() != ESP_RST_USB) return;
+    struct stat st;
+    if (stat("/sd/config/devmode_noauto", &st) == 0) return;
+    static const char *const paths[] = { "/sd/apps/devmode/devmode.papp", "/sd/apps/Abed/devmode/devmode.papp" };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        if (stat(paths[i], &st) != 0) continue;
+        char err[160];
+        ESP_LOGI(TAG, "USB reset (Thonny?): starting %s", paths[i]);
+        if (lx_app_launch(paths[i], 0, NULL, err, sizeof(err)) != ESP_OK)
+            ESP_LOGW(TAG, "Developer Mode did not start: %s", err);
+        return;
+    }
+}
+
 void app_main(void)
 {
     lx_devlink_early_init();
@@ -131,4 +153,5 @@ void app_main(void)
     if (home_start() != ESP_OK)
         ESP_LOGE(TAG, "home screen failed to start");
     ESP_LOGI(TAG, "ready");
+    devmode_autostart();
 }

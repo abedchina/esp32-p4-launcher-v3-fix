@@ -210,7 +210,16 @@ int _fstat(int fd, struct stat *st)
 int _stat(const char *path, struct stat *st)
 {
     memset(st, 0, sizeof(*st));
-    long sz = papp_fs() ? papp_fs()->size(path) : -1;
+    const papp_if_fs_t *fs = papp_fs();
+    if (fs && fs->hdr.version >= 2) {                  /* launcher 0.33+: folders too */
+        papp_stat_t ps;
+        if (fs->stat(path, &ps) != 0) { errno = ENOENT; return -1; }
+        st->st_size = ps.size;
+        st->st_mode = ps.is_dir ? S_IFDIR : S_IFREG;
+        st->st_mtime = (time_t)ps.mtime;
+        return 0;
+    }
+    long sz = fs ? fs->size(path) : -1;
     if (sz < 0) { errno = ENOENT; return -1; }
     st->st_size = sz;
     st->st_mode = S_IFREG;
@@ -220,7 +229,12 @@ int _stat(const char *path, struct stat *st)
 int _isatty(int fd)                   { return fd >= 0 && fd < FD_BASE; }
 int _unlink(const char *path)         { return papp_fs() && papp_fs()->remove(path) == 0 ? 0 : (errno = ENOENT, -1); }
 int _link(const char *a, const char *b) { errno = ENOSYS; return -1; }
-int _rename(const char *a, const char *b) { errno = ENOSYS; return -1; }   /* FS has no rename yet */
+int _rename(const char *a, const char *b)
+{
+    const papp_if_fs_t *fs = papp_fs();
+    if (!fs || fs->hdr.version < 2) { errno = ENOSYS; return -1; }   /* launcher before 0.33 */
+    return fs->rename(a, b) == 0 ? 0 : (errno = EIO, -1);
+}
 int _fcntl(int fd, int cmd, int arg)  { return 0; }
 int fsync(int fd)                     { return 0; }                         /* writes go straight to the FS */
 int _kill(int pid, int sig)           { errno = EINVAL; return -1; }
